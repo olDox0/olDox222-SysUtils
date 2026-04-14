@@ -6,66 +6,53 @@
 
 #define BUFFER_SIZE (1024 * 1024)
 
-// LISTA DE EXCLUSÃO DEFINITIVA
-const char *DOX_SKIP_LIST[] = {
-    "venv", ".venv", "__pycache__", ".git", "node_modules", 
-    "tmp", "temp", ".cache", "dist", "build", 
-    "nppBackup", "thirdparty", ".doxoade", 
-    "desktop.ini", "thumbs.db", NULL  // Adicionados arquivos de sistema
-};
+void pack_file(const char *base_path, const char *full_path, char *buffer) {
+    // Calcula caminho relativo
+    const char *rel = full_path + strlen(base_path);
+    if (*rel == '\\' || *rel == '/') rel++;
 
-int should_skip(const char *name) {
-    // 1. Ignora pastas da lista
-    for (int i = 0; DOX_SKIP_LIST[i] != NULL; i++) {
-        if (stricmp(name, DOX_SKIP_LIST[i]) == 0) return 1;
+    FILE *f = fopen(full_path, "rb");
+    if (!f) return;
+
+    // Obtém tamanho
+    fseek(f, 0, SEEK_END);
+    unsigned long long dlen = _ftelli64(f);
+    fseek(f, 0, SEEK_SET);
+
+    unsigned int nlen = strlen(rel);
+
+    // Protocolo: [nlen][name][dlen][data]
+    fwrite(&nlen, 4, 1, stdout);
+    fwrite(rel, 1, nlen, stdout);
+    fwrite(&dlen, 8, 1, stdout);
+
+    size_t n;
+    while ((n = fread(buffer, 1, BUFFER_SIZE, f)) > 0) {
+        fwrite(buffer, 1, n, stdout);
     }
-    // 2. Ignora extensões de lixo (.bak e .log)
-    const char *dot = strrchr(name, '.');
-    if (dot) {
-        if (stricmp(dot, ".bak") == 0 || stricmp(dot, ".log") == 0) return 1;
-    }
-    return 0;
-}
-
-void pack_recursive(const char *base_path, char *curr_path, char *buffer) {
-    char search[MAX_PATH];
-    sprintf(search, "%s\\*", curr_path);
-    WIN32_FIND_DATA fd;
-    HANDLE h = FindFirstFile(search, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-
-    do {
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        if (should_skip(fd.cFileName)) continue; // FILTRO ATIVO
-
-        char full[MAX_PATH];
-        sprintf(full, "%s\\%s", curr_path, fd.cFileName);
-
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            pack_recursive(base_path, full, buffer);
-        } else {
-            const char *rel = full + strlen(base_path) + 1;
-            unsigned int nlen = strlen(rel);
-            unsigned long long dlen = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-            fwrite(&nlen, 4, 1, stdout);
-            fwrite(rel, 1, nlen, stdout);
-            fwrite(&dlen, 8, 1, stdout);
-            FILE *f = fopen(full, "rb");
-            if (f) {
-                size_t n;
-                while ((n = fread(buffer, 1, BUFFER_SIZE, f)) > 0) fwrite(buffer, 1, n, stdout);
-                fclose(f);
-            }
-        }
-    } while (FindNextFile(h, &fd));
-    FindClose(h);
+    fclose(f);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) return 1;
+    if (argc < 3) return 1;
+    // argv[1] = Caminho Base
+    // argv[2] = Caminho para arquivo de lista (.txt)
+
     _setmode(_fileno(stdout), _O_BINARY);
     char *buf = malloc(BUFFER_SIZE);
-    pack_recursive(argv[1], argv[1], buf);
+
+    FILE *list_f = fopen(argv[2], "r");
+    if (!list_f) return 1;
+
+    char line[32768];
+    while (fgets(line, sizeof(line), list_f)) {
+        line[strcspn(line, "\r\n")] = 0; // Remove \n
+        if (strlen(line) > 0) {
+            pack_file(argv[1], line, buf);
+        }
+    }
+
+    fclose(list_f);
     free(buf);
     return 0;
 }
