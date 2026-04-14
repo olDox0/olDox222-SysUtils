@@ -26,7 +26,7 @@ def cli():
 
 @cli.command()
 @click.argument("source", type=click.Path(exists=True))
-@click.password_option("--password", help="Senha para criptografar.")
+@click.password_option("--password", prompt="Digite a senha para proteger o backup", confirmation_prompt=True)
 def pack(source, password):
     """Backup Native de Alta Performance."""
     source = os.path.abspath(source)
@@ -50,25 +50,32 @@ def pack(source, password):
 
 @cli.command()
 @click.argument("file", type=click.Path(exists=True))
-@click.argument("dest")
-@click.password_option("--password", help="Senha para descriptografar.")
+@click.argument("dest", default=".") # Agora o destino é opcional, padrão é a pasta atual
+@click.password_option("--password", prompt="Digite a senha para descriptografar", confirmation_prompt=False)
 def unpack(file, dest, password):
-    """Descriptografa e Extrai um backup."""
-    if not os.path.exists(dest):
-        os.makedirs(dest)
+    """Descriptografa e Extrai um backup em uma subpasta segura."""
+    # 1. Gera o nome da pasta de saída baseado no arquivo
+    # backup_doxoade.dox -> backup_doxoade_extracted
+    base_name = os.path.basename(file).replace(".dox", "")
+    output_folder = os.path.join(dest, f"{base_name}_extracted")
     
-    click.echo(f"[DoxBackup] Restaurando {file}...")
+    # 2. Cria a pasta se não existir
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    click.secho(f"[DoxBackup] Restaurando conteúdo em: {output_folder}", fg="yellow")
+    
     try:
-        engine.restore_data(file, dest, password)
-        click.secho(f"[OK] Restaurado com sucesso em: {dest}", fg="green", bold=True)
+        engine.restore_data(file, output_folder, password)
+        click.secho(f"\n[SUCESSO] Restauração concluída em: {output_folder}", fg="green", bold=True)
     except Exception as e:
-        click.secho(f"[ERRO] Falha na restauração: {e}", fg="red")
+        click.secho(f"\n[ERRO] Falha na restauração: {e}", fg="red")
         
 @cli.command()
 @click.argument("file", type=click.Path(exists=True))
 @click.option("--ext", "-x", help="Mostrar APENAS esta extensão (ex: .md).")
 @click.option("--exclude", "-e", help="EXCLUIR esta extensão da lista (ex: .py).")
-@click.password_option("--password", help="Senha.")
+@click.password_option("--password", prompt="Digite a senha para abrir o cofre", confirmation_prompt=False)
 def list(file, ext, exclude, password):
     """Lista o conteúdo do backup com filtros de inclusão e exclusão."""
     click.echo(f"[DoxBackup] Abrindo cofre: {file}...")

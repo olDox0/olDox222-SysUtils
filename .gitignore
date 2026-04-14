@@ -30,11 +30,14 @@ tmp/
 tests/
 regression_tests/canon/
 recovery_zone/
+Canone_Test/
 data/
 credentials.json
 token.json
 config.json
 #doxoade.bat
+*.ini
+*.dox
 *.db
 *.log
 *.txt

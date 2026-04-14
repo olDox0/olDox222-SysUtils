@@ -86,26 +86,46 @@ def backup_data(source_dir, output_file, password):
 def restore_data(source_file, dest_dir, password):
     temp_decrypted = source_file + ".dec"
     decrypt_file_stream(source_file, temp_decrypted, password)
+
     dctx = zstd.ZstdDecompressor()
     with open(temp_decrypted, 'rb') as f_in:
         with dctx.stream_reader(f_in) as stream:
             while True:
                 raw_name_len = stream.read(4)
                 if not raw_name_len: break
+                
                 name_len = struct.unpack('I', raw_name_len)[0]
                 path = stream.read(name_len).decode('utf-8', errors='ignore')
+                
                 raw_data_len = stream.read(8)
+                if not raw_data_len: break
                 data_len = struct.unpack('Q', raw_data_len)[0]
+                
                 full_path = os.path.join(dest_dir, path)
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, 'wb') as f_out:
+                
+                # --- TRATAMENTO DE PERMISSÃO ---
+                try:
+                    with open(full_path, 'wb') as f_out:
+                        remaining = data_len
+                        while remaining > 0:
+                            chunk = stream.read(min(remaining, 128 * 1024))
+                            if not chunk: break
+                            f_out.write(chunk)
+                            remaining -= len(chunk)
+                except PermissionError:
+                    print(f"  [AVISO] Ignorado por falta de permissão: {path}")
+                    # Importante: Mesmo ignorando a escrita, PRECISAMOS ler os bytes 
+                    # do stream para não dessincronizar o cabeçalho do próximo arquivo
                     remaining = data_len
                     while remaining > 0:
                         chunk = stream.read(min(remaining, 128 * 1024))
                         if not chunk: break
-                        f_out.write(chunk)
                         remaining -= len(chunk)
-    if os.path.exists(temp_decrypted): os.remove(temp_decrypted)
+                # -------------------------------
+
+    if os.path.exists(temp_decrypted):
+        os.remove(temp_decrypted)
 
 def create_backup(source_path, output_path):
     source_path = normalize_path(source_path)

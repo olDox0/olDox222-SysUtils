@@ -10,7 +10,8 @@
 const char *DOX_SKIP_LIST[] = {
     "venv", ".venv", "__pycache__", ".git", "node_modules", 
     "tmp", "temp", ".cache", "dist", "build", 
-    "nppBackup", "thirdparty", ".doxoade", NULL 
+    "nppBackup", "thirdparty", ".doxoade", 
+    "desktop.ini", "thumbs.db", NULL  // Adicionados arquivos de sistema
 };
 
 int should_skip(const char *name) {
