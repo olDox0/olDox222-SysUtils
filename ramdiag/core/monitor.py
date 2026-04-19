@@ -3,8 +3,21 @@
 import psutil
 import time
 
-from datetime   import datetime
-from collections import defaultdict
+from pathlib import Path
+#from datetime   import datetime
+
+def trim_memory():
+    """Chama a DLL nativa para reduzir o Working Set de todos os processos."""
+    from utils.vulcan_build import ensure_native_engine
+    import ctypes
+    
+    if ensure_native_engine("vulcan_ram.dll"):
+        dll_path = Path("engine/native/vulcan_ram.dll")
+        if not dll_path.exists():
+            return 0
+    
+    lib = ctypes.CDLL(str(dll_path))
+    return lib.trim_all_processes()
 
 def get_ram_usage():
     """Retorna um resumo global da memória."""
@@ -38,6 +51,8 @@ def get_top_processes(limit=10):
     
 def get_aggregated_usage():
     """Agrupa o consumo de memória por nome de processo."""
+    from collections import defaultdict
+    
     totals = defaultdict(int)
     counts = defaultdict(int)
     

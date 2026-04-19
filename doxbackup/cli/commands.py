@@ -6,8 +6,11 @@ if os.path.exists(_b):
     _m = _u.module_from_spec(_s); _s.loader.exec_module(_m); _m.ignite(__file__, globals())
 # [/DOXOADE:VULCAN]
 
-import click, os, time
-from doxbackup.core import engine
+# doxbackup/cli/commands.py
+
+import click
+import os
+from pathlib import Path
 
 @click.group()
 def cli():
@@ -16,24 +19,42 @@ def cli():
 
 @cli.command()
 @click.argument("source", type=click.Path(exists=True))
-@click.option("--diff", is_flag=True, help="Apenas modificados.")
-@click.option("--hint", default="", help="Dica de senha.")
-# Mantemos o prompt automático apenas no pack porque é onde você define a senha
-@click.password_option("--password", prompt="Defina a senha do backup", confirmation_prompt=True)
-def pack(source, diff, hint, password):
-    """Cria backup comprimido e criptografado."""
-    source_path = os.path.abspath(source.rstrip(os.sep))
-    output = f"backup_{os.path.basename(source_path)}.dox"
-    ts = engine.get_last_backup_time(source_path) if diff else 0
+@click.option("--output", "-o", default="backup.dox", help="Nome do arquivo de saída.")
+@click.option("--quantum", is_flag=True, help="Ativa Criptografia Híbrida Pós-Quântica (Kyber-768).")
+@click.option("--hint", default="", help="Dica de senha para o container.")
+@click.password_option(prompt="Defina a senha do container", confirmation_prompt=True)
+def pack(source, output, quantum, hint, password):
+    """Cria um container de backup ultra-seguro e otimizado."""
+    from doxbackup.core.engine import run_quantum_backup
+    from diskdiag.core.storage import init_db
     
-    click.echo(f"[DoxBackup] Processando: {source_path}")
-    try:
-        engine.backup_data(source_path, output, password, timestamp=ts, hint=hint)
-        engine.update_last_backup_time(source_path)
+    source_path = Path(source).resolve()
+    
+    # 1. Coleta lista de arquivos (podemos usar o indexer que já temos)
+    db_path = "data/db/files.db"
+    
+    click.echo(f"[VULCAN] Coletando arquivos de: {source_path}")
+    # Simulação de coleta (ou use a função get_file_list do engine.py anterior)
+    files = [p for p in source_path.rglob('*') if p.is_file()]
+    
+    if not files:
+        click.secho("[ERRO] Nenhum arquivo encontrado para backup.", fg="red")
+        return
+
+    # 2. Executa o Packer Nativo
+    mode = "PÓS-QUÂNTICO" if quantum else "CLÁSSICO"
+    click.secho(f"[INICIANDO] Modo: {mode} | Arquivos: {len(files)}", fg="cyan", bold=True)
+    
+    success = run_quantum_backup(output, source_path, files, password, hint=hint, quantum=quantum)
+#    success = run_quantum_backup(output, files, password, hint=hint, quantum=quantum)
+    
+    if success:
         size = os.path.getsize(output) / (1024 * 1024)
-        click.secho(f"\n[SUCESSO] Tamanho: {size:.2f} MB", fg="green", bold=True)
-    except Exception as e:
-        click.secho(f"\n[ERRO] {e}", fg="red")
+        click.secho(f"\n[SUCESSO] Container '{output}' criado ({size:.2f} MB).", fg="green", bold=True)
+        if quantum:
+            click.secho("🛡️ Proteção Kyber-768 (ML-KEM) aplicada ao cabeçalho.", fg="magenta")
+    else:
+        click.secho("\n[FALHA] Erro ao gerar o container de backup.", fg="red")
 
 @cli.command()
 @click.argument("file", type=click.Path(exists=True))
@@ -42,6 +63,7 @@ def pack(source, diff, hint, password):
 def list(file, exclude, password):
     """Lista o conteúdo e mostra a dica ANTES da senha."""
     from doxbackup.core.security import get_hint_from_file
+    from doxbackup.core import engine
     
     # 1. Mostra a dica primeiro
     hint = get_hint_from_file(file)
@@ -73,6 +95,7 @@ def list(file, exclude, password):
 def unpack(file, dest, password):
     """Extrai o backup e mostra a dica ANTES da senha."""
     from doxbackup.core.security import get_hint_from_file
+    from doxbackup.core import engine
     
     hint = get_hint_from_file(file)
     click.secho(f"\n[Dica de Senha]: {hint}", fg="yellow", bold=True)

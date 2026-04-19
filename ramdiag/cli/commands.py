@@ -76,3 +76,14 @@ def summary(limit):
     for item in summary_data[:limit]:
         mem_str = format_bytes(item['total_memory'])
         click.echo(f"  {item['instances']:>10} | {mem_str:>15} | {item['name']}")
+        
+@cli.command()
+def trim():
+    """Libera RAM forçando processos a devolverem memória não utilizada."""
+    click.secho("[VULCAN] Iniciando RAM Trim (EmptyWorkingSet)...", fg="cyan")
+    from ramdiag.core.monitor import trim_memory
+    
+    count = trim_memory()
+    click.secho(f"[SUCESSO] Memória otimizada em {count} processos.", fg="green", bold=True)
+    click.echo("Verifique o 'ram summary' para ver a queda no consumo.")
+

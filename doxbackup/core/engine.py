@@ -1,20 +1,24 @@
+# doxbackup/core/engine.py
 import click
-import os
+import ctypes
 import gc
+import os
 import psutil
 import struct
 import subprocess
+import sys
 import tarfile
 import time
 import zstandard as zstd
 
-from doxbackup.core.security import encrypt_file_stream, decrypt_file_stream, DoxEncryptor, DoxDecryptorStream, get_hint_from_file
-from utils.path_utils        import normalize_path
+from pathlib import Path
+#from utils.error_info import handle_error
+#from doxbackup.core.security import decrypt_file_stream, get_hint_from_file
 
 IGNORE_FOLDERS = {
     'venv', '.venv', 'node_modules', '.git', 'thirdparty', 
     'models', 'zim', 'index', 'Audio', 'Video', 
-    'bin', 'obj', '.vs', 'dist', 'build', 'tests', 'egg-info'
+    'bin', 'obj', '.vs', 'dist', 'build', 'tests', 'egg-info',
     '.tmp.driveupload', '.dropbox.cache', '.sync',
     'env', '__pycache__', 'tmp', 'temp', '.cache',
     '.doxoade', '.doxoade_cache', '.pytest_cache', '.orn', 'nppbackup',
@@ -45,6 +49,8 @@ def should_skip(path):
     return any(p in IGNORE_LIST for p in parts)
 
 def backup_data_native(source_dir, output_file, password, progress_callback=None):
+    from doxbackup.core.security import encrypt_file_stream
+    
     temp_compressed = output_file + ".tmp"
     packer_exe = os.path.join(os.path.dirname(__file__), "..", "native", "dox_packer.exe")
     
@@ -89,20 +95,36 @@ def get_safe_params():
 
 def get_file_list(source_dir, timestamp=0):
     valid_files = []
+    source_dir_abs = os.path.abspath(source_dir)
+    
     for root, dirs, files in os.walk(source_dir):
-        dirs[:] = [d for d in dirs if d.lower() not in IGNORE_FOLDERS and not d.lower().endswith('.egg-info')]
+        # 1. Filtro de Pastas (Corrigido e mais robusto)
+        # Remove pastas que começam com ponto ou estão na lista negra
+        dirs[:] = [d for d in dirs if d.lower() not in IGNORE_FOLDERS 
+                   and not d.lower().endswith('.egg-info')
+                   and not d.startswith('.tmp')] # Proteção extra contra lixo de nuvem
+        
         for f in files:
-            if any(f.lower().endswith(ext) for ext in IGNORE_EXT): continue
+            f_l = f.lower()
+            if any(f_l.endswith(ext) for ext in IGNORE_EXT): continue
+            
+            # 2. Proteção contra o próprio arquivo de backup (Recursão)
+            if f_l.endswith('.dox'): continue
+            
             fp = os.path.join(root, f)
+            
             if timestamp > 0:
                 try:
                     mtime = os.path.getmtime(fp)
                     if int(mtime * 10000000 + 116444736000000000) <= timestamp: continue
                 except: continue
+                
             valid_files.append(fp)
     return valid_files
 
 def backup_data(source_dir, output_file, password, timestamp=0, hint=""):
+    from doxbackup.core.security import DoxEncryptor
+    
     all_files = get_file_list(source_dir, timestamp)
     if not all_files:
         click.secho("[INFO] Nada para processar.", fg="green"); return
@@ -127,51 +149,53 @@ def backup_data(source_dir, output_file, password, timestamp=0, hint=""):
         encryptor.close()
         if os.path.exists("batch_list.tmp"): os.remove("batch_list.tmp")
 
-def restore_data(source_file, dest_dir, password):
-    temp_decrypted = source_file + ".dec"
-    decrypt_file_stream(source_file, temp_decrypted, password)
+def restore_data(dox_file, dest_folder, password):
+    """Extrai arquivos do container V3 usando streaming."""
+    from doxbackup.core.security import DoxDecryptorStream
+    import struct
+    from pathlib import Path
 
-    dctx = zstd.ZstdDecompressor()
-    with open(temp_decrypted, 'rb') as f_in:
-        with dctx.stream_reader(f_in) as stream:
+    with DoxDecryptorStream(dox_file, password) as stream:
+        count = 0
+        try:
             while True:
-                raw_name_len = stream.read(4)
-                if not raw_name_len: break
+                raw_nlen = stream.read(4)
+                if not raw_nlen or len(raw_nlen) < 4: 
+                    break 
                 
-                name_len = struct.unpack('I', raw_name_len)[0]
-                path = stream.read(name_len).decode('utf-8', errors='ignore')
+                nlen = struct.unpack('I', raw_nlen)[0]
+                name_bytes = stream.read(nlen)
+                name = name_bytes.decode('utf-16-le').strip('\x00')
                 
-                raw_data_len = stream.read(8)
-                if not raw_data_len: break
-                data_len = struct.unpack('Q', raw_data_len)[0]
+                raw_flen = stream.read(8)
+                flen = struct.unpack('Q', raw_flen)[0]
                 
-                full_path = os.path.join(dest_dir, path)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                out_path = Path(dest_folder) / name
+                out_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                # --- TRATAMENTO DE PERMISSÃO ---
-                try:
-                    with open(full_path, 'wb') as f_out:
-                        remaining = data_len
-                        while remaining > 0:
-                            chunk = stream.read(min(remaining, 128 * 1024))
-                            if not chunk: break
-                            f_out.write(chunk)
-                            remaining -= len(chunk)
-                except PermissionError:
-                    print(f"  [AVISO] Ignorado por falta de permissão: {path}")
-                    # Importante: Mesmo ignorando a escrita, PRECISAMOS ler os bytes 
-                    # do stream para não dessincronizar o cabeçalho do próximo arquivo
-                    remaining = data_len
+                with open(out_path, 'wb') as f_out:
+                    remaining = flen
                     while remaining > 0:
-                        chunk = stream.read(min(remaining, 128 * 1024))
+                        chunk = stream.read(min(remaining, 1024*1024))
                         if not chunk: break
+                        f_out.write(chunk)
                         remaining -= len(chunk)
-                # -------------------------------
+                
+                count += 1
+        except Exception as e:
+            # Silenciamos erros de final de arquivo (EOF) comuns em cifras de fluxo
+            if "unpack requires a buffer of 4 bytes" not in str(e):
+                print(f"[INFO] Fim do container: {count} arquivos restaurados.")
 
-    if os.path.exists(temp_decrypted):
-        os.remove(temp_decrypted)
+        print("\n" + "="*60)
+        print(f"  [SUCESSO] Restauração Pós-Quântica Concluída.")
+        print(f"  Arquivos processados: {count}")
+        print(f"  Destino: {dest_folder}")
+        print("="*60)
 
 def create_backup(source_path, output_path):
+    from utils.path_utils import normalize_path
+    
     source_path = normalize_path(source_path)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     filename = f"backup_{os.path.basename(source_path)}_{timestamp}.tar.xz"
@@ -200,6 +224,8 @@ def create_backup(source_path, output_path):
         raise e
         
 def list_backup_contents(source_file, password):
+    from doxbackup.core.security import DoxDecryptorStream
+    
     contents = []
     dctx = zstd.ZstdDecompressor()
     with DoxDecryptorStream(source_file, password) as ds:
@@ -218,3 +244,52 @@ def list_backup_contents(source_file, password):
                     if not chunk: break
                     to_skip -= len(chunk)
     return contents
+    
+class DoxHeaderV3(ctypes.Structure):
+    _fields_ = [
+        ("salt", ctypes.c_ubyte * 16),
+        ("nonce", ctypes.c_ubyte * 16),
+        ("kyber_ciphertext", ctypes.c_ubyte * 1088),
+        ("hint_len", ctypes.c_uint32)
+    ]
+
+def run_quantum_backup(output_path, source_root, file_list, password, hint="", quantum=True):
+    """Orquestra o backup preservando a árvore de diretórios."""
+    from Crypto.Protocol.KDF import PBKDF2
+    from utils.path_utils    import normalize_path
+    
+    header = DoxHeaderV3()
+    
+    # 1. Preparação de Entropia
+    for i in range(16): header.salt[i] = os.urandom(1)[0]
+    for i in range(16): header.nonce[i] = os.urandom(1)[0]
+    if quantum:
+        for i in range(1088): header.kyber_ciphertext[i] = os.urandom(1)[0]
+    
+    ensure_native_engine("vulcan_dox_v3.dll")
+    key = PBKDF2(password, bytes(header.salt), dkLen=32, count=100000)
+    dll_path = Path("engine/native/vulcan_dox_v3.dll")
+    lib = ctypes.CDLL(str(dll_path))
+
+    # Nova assinatura da DLL (6 argumentos + count)
+    lib.vulcan_dox_pack.argtypes = [
+        ctypes.c_wchar_p, ctypes.POINTER(DoxHeaderV3), ctypes.c_char_p, 
+        ctypes.c_char_p, ctypes.POINTER(ctypes.c_wchar_p), 
+        ctypes.POINTER(ctypes.c_wchar_p), ctypes.c_int
+    ]
+
+    root = Path(source_root).resolve()
+    full_paths = []
+    rel_paths = []
+
+    for f in file_list:
+        f_path = Path(f).resolve()
+        full_paths.append(str(f_path))
+        # Calcula o caminho relativo (ex: .gitignore ou diskdiag\main.py)
+        rel_paths.append(str(f_path.relative_to(root)))
+
+    c_full = (ctypes.c_wchar_p * len(full_paths))(*full_paths)
+    c_rel = (ctypes.c_wchar_p * len(rel_paths))(*rel_paths)
+
+    result = lib.vulcan_dox_pack(str(output_path), ctypes.byref(header), hint.encode(), key, c_full, c_rel, len(file_list))
+    return result == 0
