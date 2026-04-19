@@ -257,6 +257,7 @@ def run_quantum_backup(output_path, source_root, file_list, password, hint="", q
     """Orquestra o backup preservando a árvore de diretórios."""
     from Crypto.Protocol.KDF import PBKDF2
     from utils.path_utils    import normalize_path
+    from utils.vulcan_build import ensure_native_engine
     
     header = DoxHeaderV3()
     
