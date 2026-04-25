@@ -1,46 +1,83 @@
-# [DOXOADE:VULCAN]
-# [VULCAN-SKIP] Proteção contra introspecção Click
-import os, sys; _b = os.path.join(os.getcwd(), ".doxoade", "vulcan", "bootstrap.py")
-if os.path.exists(_b):
-    import importlib.util as _u; _s = _u.spec_from_file_location("_vb", _b)
-    _m = _u.module_from_spec(_s); _s.loader.exec_module(_m); _m.ignite(__file__, globals())
-# [/DOXOADE:VULCAN]
-
 # cli/main.py
-import click
-import os
 import sys
+import os
 from pathlib import Path
 
-# --- INJEÇÃO VULCAN ---
-# Adiciona a raiz do projeto ao path para localizar 'bloatbreaker' e 'engine'
-project_root = str(Path(__file__).parents[1])
+# ------ INJEÇÃO DE PATH ------
+# Garante que o diretório raiz esteja no topo do sys.path, não importa onde o comando seja chamado
+project_root = str(Path(__file__).resolve().parents[1])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# ----------------------
+# -----------------------------
 
-from diskdiag.cli.commands     import cli as disk_commands
-from ramdiag.cli.commands      import cli as ram_commands
-from doxbackup.cli.commands    import cli as backup_commands
-from bloatbreaker.cli.commands import cli as bloat_commands
+import click
+import traceback
+import tempfile
+import subprocess
+from importlib import import_module
 
-@click.group()
+class SysUtilsLazyGroup(click.Group):
+    """Orquestrador Zeus: Carrega os submódulos apenas quando invocados."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lazy_map = {
+            'disk':   'diskdiag.cli.commands:cli',
+            'ram':    'ramdiag.cli.commands:cli',
+            'backup': 'doxbackup.cli.commands:cli',
+            'bloat':  'bloatbreaker.cli.commands:cli',
+            'win':    'sysdiag.cli.commands:cli',
+            'net':    'netdiag.cli.commands:cli',
+        }
+
+    def list_commands(self, ctx):
+        return sorted(self._lazy_map.keys())
+
+    def get_command(self, ctx, name):
+        if name not in self._lazy_map:
+            return None
+        module_path, attr_name = self._lazy_map[name].split(':')
+        try:
+            mod = import_module(module_path)
+            return getattr(mod, attr_name)
+        except Exception as e:
+            click.secho(f"\n[FATAL] Erro ao carregar comando '{name}': {e}", fg='red')
+            return None
+
+@click.group(cls=SysUtilsLazyGroup)
 def cli():
-    """SysUtils — Suite de Diagnóstico de Sistema."""
+    """SysUtils — Suite de Diagnóstico e Otimização de Sistema (Chief-Gold)."""
     pass
 
-# Adiciona o módulo diskdiag como um sub-comando 'disk'
-cli.add_command(disk_commands,   name="disk"  )
-cli.add_command(ram_commands,    name="ram"   )
-cli.add_command(backup_commands, name="backup")
-cli.add_command(bloat_commands,  name="bloat" )
+def main():
+    try:
+        # Injeção de Path para garantir que os módulos locais sejam achados
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+            
+        cli(obj={})
+    except Exception as e:
+        # Aciona o Protocolo Lazarus em caso de crash
+        err_msg = traceback.format_exc()
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        rescue_script = os.path.join(current_dir, 'rescue.py')
+        
+        fd, path = tempfile.mkstemp()
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                tmp.write(err_msg)
+            subprocess.run([sys.executable, rescue_script, path], check=False)
+        finally:
+            try: os.remove(path)
+            except Exception as e:
+                import sys as _dox_sys, os as _dox_os
+                exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+                f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                line_n = exc_tb.tb_lineno
+                print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: main\033[0m")
+                print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
+        sys.exit(1)
 
-# Atalho para rodar direto o diskdiag se o usuário preferir
-@click.command()
-@click.pass_context
-def diskdiag(ctx):
-    """Atalho para diagnóstico de disco."""
-    ctx.invoke(disk_commands)
-
-if __name__ == "__main__":
-    cli()
+if __name__ == '__main__':
+    main()

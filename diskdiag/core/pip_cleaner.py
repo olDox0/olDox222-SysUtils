@@ -82,7 +82,13 @@ def scan_pip_junk():
                         
                         junk_list.append((str(entry), size))
                         total_size += size
-                    except: pass
+                    except Exception as e:
+                        import sys as _dox_sys, os as _dox_os
+                        exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+                        f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                        line_n = exc_tb.tb_lineno
+                        print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: scan_pip_junk\033[0m")
+                        print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
         except Exception as e:
             handle_error(e, context=f"pip_scan:{p.name}", silent=True)
 

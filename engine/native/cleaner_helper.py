@@ -17,7 +17,13 @@ def vulcan_batch_delete(file_paths):
             try:
                 os.remove(p)
                 deleted += 1
-            except: pass
+            except Exception as e:
+                import sys as _dox_sys, os as _dox_os
+                exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+                f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                line_n = exc_tb.tb_lineno
+                print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: vulcan_batch_delete\033[0m")
+                print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
         return deleted
 
     lib = ctypes.CDLL(str(dll_path))

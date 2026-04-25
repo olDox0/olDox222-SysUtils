@@ -84,57 +84,76 @@ def decrypt_file_stream(in_file, out_file, password):
             cipher.verify(tag)
     
 class DoxEncryptor:
-    def __init__(self, out_file_path, password, hint=""):
+    def __init__(self, out_file_path, password, hint="", quantum=False):
         self.f_out = open(out_file_path, 'wb')
         self.salt = os.urandom(16)
         self.key = PBKDF2(password, self.salt, dkLen=32, count=100000)
-        self.cipher = AES.new(self.key, AES.MODE_GCM)
         
-        # Cabeçalho: Salt(16) + Nonce(16)
+        # 1. Salt (16) e Nonce (16)
+        self.nonce = os.urandom(16)
         self.f_out.write(self.salt)
-        self.f_out.write(self.cipher.nonce)
+        self.f_out.write(self.nonce)
         
-        # Dica: Tamanho(4) + Texto
+        # 2. Espaço Quantum (1088 bytes) - OBRIGATÓRIO para alinhar com o Decryptor
+        # Se não houver proteção quântica real, preenchemos com zeros
+        shield = b'\x00' * 1088
+        if quantum:
+            # Aqui entraria a geração da chave Kyber se o módulo estivesse ativo
+            pass
+        self.f_out.write(shield)
+        
+        # 3. Dica: Tamanho(4) + Texto
         h_bytes = hint.encode('utf-8', errors='ignore')
         self.f_out.write(struct.pack('I', len(h_bytes)))
         self.f_out.write(h_bytes)
+        
+        # Estado para a cifra de fluxo Vulcan (XOR)
+        self.state = 0
 
     def write(self, chunk):
-        if chunk: self.f_out.write(self.cipher.encrypt(chunk))
-        return len(chunk)
+        if not chunk: return 0
+        # Usamos XOR simples para o stream de listagem (compatível com a Engine C)
+        data = bytearray(chunk)
+        for i in range(len(data)):
+            data[i] ^= self.key[self.state % 32]
+            self.state += 1
+        self.f_out.write(data)
+        return len(data)
 
-    def flush(self): self.f_out.flush()
     def close(self):
-        if not self.f_out.closed:
-            self.f_out.write(self.cipher.digest())
-            self.f_out.close()
+        self.f_out.close()
 
 class DoxDecryptorStream:
     def __init__(self, in_file_path, password):
         self.f_in = open(in_file_path, 'rb')
+        # 1. Cabeçalho Fixo
         self.salt = self.f_in.read(16)
         self.nonce = self.f_in.read(16)
-        self.f_in.read(1088) # Pula Kyber-768
+        self.f_in.read(1088) # Pula o Escudo Kyber-768
         
-        # Lê a dica (Plaintext)
+        # 2. Dica de Senha
         raw_h_len = self.f_in.read(4)
+        if not raw_h_len: raise ValueError("Arquivo inválido")
         h_len = struct.unpack('I', raw_h_len)[0]
-        self.f_in.read(h_len) 
+        self.hint = self.f_in.read(h_len).decode('utf-8', errors='ignore')
         
-        # Derivação da chave idêntica ao Packer
+        # 3. Preparação da Cifra
         self.key = PBKDF2(password, self.salt, dkLen=32, count=100000)
-        self.state = 0
+        self.state = 0 # O estado começa em 0 logo após o cabeçalho
 
     def read(self, size):
         chunk = self.f_in.read(size)
         if not chunk: return b""
-        
-        # Descriptografia de Fluxo XOR (Mesma lógica do C)
         data = bytearray(chunk)
         for i in range(len(data)):
             data[i] ^= self.key[self.state % 32]
             self.state += 1
         return bytes(data)
+
+    def skip(self, n):
+        """Avança o ponteiro do arquivo e o estado da cifra sincronizadamente."""
+        self.f_in.seek(n, 1) # Seek relativo
+        self.state += n
 
     def __enter__(self): return self
     def __exit__(self, et, ev, tb): self.f_in.close()

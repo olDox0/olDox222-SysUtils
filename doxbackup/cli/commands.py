@@ -25,25 +25,27 @@ def cli():
 @click.password_option(prompt="Defina a senha do container", confirmation_prompt=True)
 def pack(source, output, quantum, hint, password):
     """Cria um container de backup ultra-seguro e otimizado."""
-    from doxbackup.core.engine import run_quantum_backup
+    from doxbackup.core.engine import run_quantum_backup, get_file_list
     from diskdiag.core.storage import init_db
     
     source_path = Path(source).resolve()
+    click.echo(f"[VULCAN] Analisando e filtrando arquivos em: {source_path}")
     
     # 1. Coleta lista de arquivos (podemos usar o indexer que já temos)
     db_path = "data/db/files.db"
     
     click.echo(f"[VULCAN] Coletando arquivos de: {source_path}")
     # Simulação de coleta (ou use a função get_file_list do engine.py anterior)
-    files = [p for p in source_path.rglob('*') if p.is_file()]
+    files = get_file_list(str(source_path))
+#    files = [p for p in source_path.rglob('*') if p.is_file()]
     
     if not files:
-        click.secho("[ERRO] Nenhum arquivo encontrado para backup.", fg="red")
+        click.secho("[AVISO] Nenhum arquivo válido restou após a filtragem.", fg="yellow")
         return
 
     # 2. Executa o Packer Nativo
     mode = "PÓS-QUÂNTICO" if quantum else "CLÁSSICO"
-    click.secho(f"[INICIANDO] Modo: {mode} | Arquivos: {len(files)}", fg="cyan", bold=True)
+    click.secho(f"[INICIANDO] Arquivos selecionados: {len(files)}", fg="cyan", bold=True)
     
     success = run_quantum_backup(output, source_path, files, password, hint=hint, quantum=quantum)
 #    success = run_quantum_backup(output, files, password, hint=hint, quantum=quantum)

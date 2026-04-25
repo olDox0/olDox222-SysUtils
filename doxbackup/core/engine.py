@@ -12,28 +12,10 @@ import time
 import zstandard as zstd
 
 from pathlib import Path
-#from utils.error_info import handle_error
-#from doxbackup.core.security import decrypt_file_stream, get_hint_from_file
 
-IGNORE_FOLDERS = {
-    'venv', '.venv', 'node_modules', '.git', 'thirdparty', 
-    'models', 'zim', 'index', 'Audio', 'Video', 
-    'bin', 'obj', '.vs', 'dist', 'build', 'tests', 'egg-info',
-    '.tmp.driveupload', '.dropbox.cache', '.sync',
-    'env', '__pycache__', 'tmp', 'temp', '.cache',
-    '.doxoade', '.doxoade_cache', '.pytest_cache', '.orn', 'nppbackup',
-}
-
-# EXTENSÕES QUE NÃO DEVEM SER COMPRIMIDAS (OU SÃO LIXO)
-IGNORE_EXT = {
-    # Binários e Pesados
-    '.gguf', '.zim', '.db', '.sqlite', '.exe', '.dll', '.bin', '.dox',
-    '.wav', '.mp4', '.avi', '.mp3', '.xcf', '.pdn', '.iso',
-    # Documentos que "engordam" o backup
-    '.doc', '.pdf', '.pptx', '.download',
-    #'.rtf', '.docx',
-    '.bak', '.bkp', '.log', '.tmp', '.jsonl', '.xml', '.pyc', '.pyd', '.pyx', '.obj', # Lixo de sistema/temp
-}
+from diskdiag.analysis.heuristics import should_ignore_dir, should_exclude_file, should_exclude_from_backup
+from doxbackup.core.security import DoxDecryptorStream
+from utils.path_utils import is_ignored_folder, should_exclude_path
 
 def get_last_backup_time(source_dir):
     marker = os.path.join(source_dir, ".dox_marker")
@@ -75,7 +57,13 @@ def backup_data_native(source_dir, output_file, password, progress_callback=None
 def get_ram_optimized_params():
     try:
         available_ram = psutil.virtual_memory().available / (1024 * 1024)
-    except:
+    except Exception as e:
+        import sys as _dox_sys, os as _dox_os
+        exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+        f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+        line_n = exc_tb.tb_lineno
+        print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: get_ram_optimized_params\033[0m")
+        print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
         available_ram = 500
     if available_ram < 400:
         return {"level": 5, "threads": 1, "ldm": False, "buf_size": 512*1024}
@@ -97,29 +85,34 @@ def get_file_list(source_dir, timestamp=0):
     valid_files = []
     source_dir_abs = os.path.abspath(source_dir)
     
-    for root, dirs, files in os.walk(source_dir):
-        # 1. Filtro de Pastas (Corrigido e mais robusto)
-        # Remove pastas que começam com ponto ou estão na lista negra
-        dirs[:] = [d for d in dirs if d.lower() not in IGNORE_FOLDERS 
-                   and not d.lower().endswith('.egg-info')
-                   and not d.startswith('.tmp')] # Proteção extra contra lixo de nuvem
+    for root, dirs, files in os.walk(source_dir_abs):
+        # EFICIÊNCIA: Poda as pastas proibidas antes de entrar nelas
+        dirs[:] = [d for d in dirs if not is_ignored_folder(d)]
         
         for f in files:
-            f_l = f.lower()
-            if any(f_l.endswith(ext) for ext in IGNORE_EXT): continue
+            full_path = os.path.join(root, f)
             
-            # 2. Proteção contra o próprio arquivo de backup (Recursão)
-            if f_l.endswith('.dox'): continue
-            
-            fp = os.path.join(root, f)
-            
+            # FILTRAGEM CENTRALIZADA
+            if should_exclude_path(full_path):
+                continue
+                
+            # Filtro Incremental (se aplicável)
             if timestamp > 0:
                 try:
-                    mtime = os.path.getmtime(fp)
-                    if int(mtime * 10000000 + 116444736000000000) <= timestamp: continue
-                except: continue
+                    mtime = os.stat(full_path).st_mtime
+                    win_time = int(mtime * 10000000 + 116444736000000000)
+                    if win_time <= timestamp: continue
+                except Exception as e:
+                    import sys as _dox_sys, os as _dox_os
+                    exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+                    f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                    line_n = exc_tb.tb_lineno
+                    print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: get_file_list\033[0m")
+                    print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
+                    continue
                 
-            valid_files.append(fp)
+            valid_files.append(full_path)
+            
     return valid_files
 
 def backup_data(source_dir, output_file, password, timestamp=0, hint=""):
@@ -223,26 +216,40 @@ def create_backup(source_path, output_path):
             os.remove(final_path)
         raise e
         
-def list_backup_contents(source_file, password):
-    from doxbackup.core.security import DoxDecryptorStream
-    
+def list_backup_contents(file_path, password):
     contents = []
-    dctx = zstd.ZstdDecompressor()
-    with DoxDecryptorStream(source_file, password) as ds:
-        with dctx.stream_reader(ds) as stream:
-            while True:
-                raw = stream.read(4)
-                if not raw or len(raw) < 4: break
-                nlen = struct.unpack('I', raw)[0]
-                path = stream.read(nlen).decode('utf-8', errors='ignore')
-                dlen = struct.unpack('Q', stream.read(8))[0]
-                contents.append((path, dlen))
-                # Pulo rápido
-                to_skip = dlen
-                while to_skip > 0:
-                    chunk = stream.read(min(to_skip, 1024*1024))
-                    if not chunk: break
-                    to_skip -= len(chunk)
+    with DoxDecryptorStream(file_path, password) as stream:
+        while True:
+            # 1. Lê Tamanho do Nome (4 bytes criptografados)
+            raw_nlen = stream.read(4)
+            if not raw_nlen: break # Fim do arquivo
+            nlen = struct.unpack('I', raw_nlen)[0]
+            
+            # 2. Lê Nome do Arquivo (nlen bytes criptografados)
+            # O motor C usa wchar_t (UTF-16LE) no Windows
+            name_bytes = stream.read(nlen)
+            try:
+                name = name_bytes.decode('utf-16le')
+            except Exception as e:
+                import sys as _dox_sys, os as _dox_os
+                exc_obj, exc_tb = _dox_sys.exc_info() #exc_type
+                f_name = _dox_os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                line_n = exc_tb.tb_lineno
+                print(f"\033[1;34m[ FORENSIC ]\033[0m \033[1mFile: {f_name} | L: {line_n} | Func: list_backup_contents\033[0m")
+                print(f"\033[31m  ■ Type: {type(e).__name__} | Value: {e}\033[0m")
+                name = name_bytes.decode('utf-8', errors='ignore')
+            
+            # 3. Lê Tamanho do Dado (8 bytes criptografados)
+            raw_dlen = stream.read(8)
+            if not raw_dlen: break
+            dlen = struct.unpack('Q', raw_dlen)[0]
+            
+            contents.append((name, dlen))
+            
+            # 4. PULA o conteúdo do arquivo para manter a performance de listagem
+            # Mas avança o state da cifra!
+            stream.skip(dlen)
+            
     return contents
     
 class DoxHeaderV3(ctypes.Structure):

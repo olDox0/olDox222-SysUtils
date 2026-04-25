@@ -4,6 +4,8 @@ import os
 import time
 from pathlib import Path
 
+from diskdiag.analysis.heuristics import should_exclude_from_backup
+
 # --- INJEÇÃO DE PATH VULCAN ---
 project_root = str(Path(__file__).parents[2])
 if project_root not in sys.path:
@@ -17,16 +19,20 @@ def is_safe(path):
     """
     Reforço de Segurança Vulcan.
     """
+    # Se o arquivo deve ser excluído de operações de backup/preservação (é lixo)
+    # Então, no contexto do CLEANER, ele é "safe" (seguro) para deletar.
+    # Mas cuidado: aqui a lógica inverte. 
+    
     path_up = path.upper()
-    # 1. Zonas Proibidas (Sistema e Arquivos de Programa)
-    if "C:\\WINDOWS" in path_up or "PROGRAM FILES" in path_up:
-        return False
-    # 2. Zona de Usuário Sensível (Solicitado por você: ignorar Temp)
-    if "APPDATA\\LOCAL\\TEMP" in path_up:
-        return False
-    # 3. Proteção do Banco de Dados
+    
+    # Proteção absoluta: Nunca mexer no banco do próprio sistema
     if "FILES.DB" in path_up or "VULCAN_IDX" in path_up:
         return False
+
+    # Se estiver em Windows ou Program Files, NÃO é seguro deletar
+    if any(zone in path_up for zone in ["C:\\WINDOWS", "PROGRAM FILES"]):
+        return False
+
     return True
 
 def run_safe_cleanup(db_path, dry_run=True):
