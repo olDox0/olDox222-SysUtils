@@ -2,7 +2,7 @@
 import sys
 import os
 import click
-from colorama import Fore, Style, init
+from utils.doxcolors import Fore, Style, init
 
 init(autoreset=True)
 

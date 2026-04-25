@@ -10,7 +10,10 @@ if os.path.exists(_b):
 
 import click
 import os
+import time
+
 from pathlib import Path
+from utils.doxcolors import colors, NexusUI
 
 @click.group()
 def cli():
@@ -20,43 +23,62 @@ def cli():
 @cli.command()
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--output", "-o", default="backup.dox", help="Nome do arquivo de saída.")
-@click.option("--quantum", is_flag=True, help="Ativa Criptografia Híbrida Pós-Quântica (Kyber-768).")
-@click.option("--hint", default="", help="Dica de senha para o container.")
+@click.option("--quantum", is_flag=True, help="Ativa Criptografia Híbrida Pós-Quântica.")
+@click.option("--hint", default="", help="Dica de senha.")
 @click.password_option(prompt="Defina a senha do container", confirmation_prompt=True)
 def pack(source, output, quantum, hint, password):
     """Cria um container de backup ultra-seguro e otimizado."""
     from doxbackup.core.engine import run_quantum_backup, get_file_list
-    from diskdiag.core.storage import init_db
     
     source_path = Path(source).resolve()
-    click.echo(f"[VULCAN] Analisando e filtrando arquivos em: {source_path}")
     
-    # 1. Coleta lista de arquivos (podemos usar o indexer que já temos)
-    db_path = "data/db/files.db"
+    # Efeito inicial de decodificação no título
+    NexusUI.decode_effect("SISTEMA DE BACKUP VULCAN V3", duration=0.4)
     
-    click.echo(f"[VULCAN] Coletando arquivos de: {source_path}")
-    # Simulação de coleta (ou use a função get_file_list do engine.py anterior)
+    click.echo(f"{colors.Fore.PRIMARY}[VULCAN]{colors.Fore.RESET} Analisando: {source_path}")
+    
+    # Coleta de arquivos (fase rápida)
     files = get_file_list(str(source_path))
-#    files = [p for p in source_path.rglob('*') if p.is_file()]
     
     if not files:
-        click.secho("[AVISO] Nenhum arquivo válido restou após a filtragem.", fg="yellow")
+        click.secho("[AVISO] Nenhum arquivo válido encontrado.", fg="yellow")
         return
 
-    # 2. Executa o Packer Nativo
-    mode = "PÓS-QUÂNTICO" if quantum else "CLÁSSICO"
-    click.secho(f"[INICIANDO] Arquivos selecionados: {len(files)}", fg="cyan", bold=True)
+    # --- INÍCIO DA ANIMAÇÃO ASSÍNCRONA ---
+    # Carregamos os frames do arquivo .nxa
+    # Se o arquivo não existir, o AsyncAnimation lida graciosamente
+    animation_path = os.path.join("data", "assets", "backup_processing.nxa")
     
-    success = run_quantum_backup(output, source_path, files, password, hint=hint, quantum=quantum)
-#    success = run_quantum_backup(output, files, password, hint=hint, quantum=quantum)
-    
+    # Se não tiver o arquivo .nxa, podemos usar frames manuais simples
+    frames = NexusUI.load_animation(animation_path) or [" [■□□] ", " [■■□] ", " [■■■] "]
+
+    click.echo(f"{colors.Fore.CYAN}Preparando compressão de {len(files)} arquivos...{colors.Fore.RESET}")
+
+    # O bloco 'with' garante que a animação pare mesmo se o backup falhar
+    with colors.AsyncAnimation(frames, interval=0.05, base_color=colors.Fore.PRIMARY) as anim:
+        try:
+            # Enquanto a animação roda na Thread B, o backup roda na Thread A
+            success = run_quantum_backup(output, source_path, files, password, hint=hint, quantum=quantum)
+            
+            # Podemos injetar logs na tela sem quebrar a animação usando anim.print()
+            if success:
+                anim.print(f"<{colors.Fore.SUCCESS}>[LOG] Camada de criptografia selada.")
+            
+        except Exception as e:
+            anim.print(f"<{colors.Fore.ERROR}>[FALHA] Erro crítico: {e}")
+            success = False
+
+    # --- FIM DA ANIMAÇÃO ---
+
     if success:
         size = os.path.getsize(output) / (1024 * 1024)
-        click.secho(f"\n[SUCESSO] Container '{output}' criado ({size:.2f} MB).", fg="green", bold=True)
+        print("\n" + "="*60)
+        print(NexusUI.gradient_text(f"BACKUP CONCLUÍDO: {output} ({size:.2f} MB)"))
         if quantum:
-            click.secho("🛡️ Proteção Kyber-768 (ML-KEM) aplicada ao cabeçalho.", fg="magenta")
+            print(f"{colors.Fore.MAGENTA}🛡️ Proteção Kyber-768 aplicada com sucesso.{colors.Fore.RESET}")
+        print("="*60)
     else:
-        click.secho("\n[FALHA] Erro ao gerar o container de backup.", fg="red")
+        click.secho("\n[ERRO] Falha ao gerar o container de backup.", fg="red", bold=True)
 
 @cli.command()
 @click.argument("file", type=click.Path(exists=True))

@@ -10,8 +10,7 @@ setup(
         "click",
         "psutil",
         "pycryptodome",
-        "zstandard",
-        "colorama"
+        "zstandard"
     ],
     entry_points={
         "console_scripts": [
