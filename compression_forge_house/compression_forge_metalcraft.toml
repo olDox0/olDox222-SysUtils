@@ -1,0 +1,9 @@
+# Nexus Metalcraft Build Contract
+[project]
+name = "compression_forge"
+house = "compression_forge_house"
+
+[build]
+targets = []
+output_dir = "bricks"
+options = "-shared -O3"

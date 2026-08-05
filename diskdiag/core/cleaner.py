@@ -114,10 +114,10 @@ def run_cleanup(db_path, dump=True):
 
     # Buscamos arquivos que batem com padrões de lixo conhecidos
     # E também tudo que está na Lixeira ou em pastas Temp
-    query = """
+    query = r"""
     SELECT id, path, size FROM files 
     WHERE path LIKE '%$RECYCLE.BIN%' 
-       OR path LIKE '%\Temp\%' 
+       OR path LIKE r'%\Temp\%'
        OR ext IN ('.tmp', '.log', '.pyc', '.bak')
     """
     

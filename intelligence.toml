@@ -1,22 +1,7 @@
-[project]
-name = "sysutils"
-version = "1"
-description = "olDox System Utils - help tools"
-requires-python = ">=3.12"
-dependencies = [
-    "psutil==7.2.2",
-]
+# intelligence.toml - Configuração de Blacklist do Motor Nexus
 
-[tool.doxoade]
-source_dir = "."
-shadow_runtime = true
-shadow_targets = ["doxoade"]
-soteria_active = true
-vulcan_turbo = true
-shadow_vacuum_check = ["scan", "find", "resolve", "parse"]
-keep = [ "coverage", "jsondiff", "pytest", "pyyaml", "radon", "setuptools"]
 ignore = [
-    # ___ PASTAS _________
+    # === PASTAS ===
     "*./experiments/",
     "*/.doxoade/",
     "*/__pycache__/",
@@ -31,7 +16,7 @@ ignore = [
     "commands_test/",
     "dist/",
     "dox_lab/",
-    "doxoade.egg-info/",
+    "*.egg-info/",
     "doxoade/diagnostic/",
     "doxoade/tools/benzaiten_gui/native/include/webview/",
     "doxoade/tools/benzaiten_gui/native/include/webview2/",
@@ -88,11 +73,5 @@ ignore = [
     "chief_dossier_*.xml",
     "*_dossier_*.xml",
 ]
-
-# pyproject.toml do Projeto SysUtils
-[tool.doxoade.bricks]
-vulcan_dict = "diskdiag/core/vulcan_dict.py"
-vulcan_bitmap = "diskdiag/core/vulcan_bitmap.py"
-
-
-
+# "*.",
+# ""/,

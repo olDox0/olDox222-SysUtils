@@ -17,6 +17,8 @@ from diskdiag.analysis.heuristics import should_ignore_dir, should_exclude_file,
 from doxbackup.core.security import DoxDecryptorStream
 from utils.path_utils import is_ignored_folder, should_exclude_path
 
+SYS_ROOT = Path(__file__).resolve().parents[2]
+
 def get_last_backup_time(source_dir):
     marker = os.path.join(source_dir, ".dox_marker")
     return int(os.path.getmtime(marker) * 10000000 + 116444736000000000) if os.path.exists(marker) else 0
@@ -267,6 +269,12 @@ def run_quantum_backup(output_path, source_root, file_list, password, hint="", q
     from utils.vulcan_build import ensure_native_engine
     
     header = DoxHeaderV3()
+    
+    packer_exe = SYS_ROOT / "doxbackup" / "native" / "dox_packer.exe"
+    
+    if not packer_exe.exists():
+        # Se o .exe não existir, tenta o .c ou avisa
+        raise FileNotFoundError(f"Motor nativo não encontrado em: {packer_exe}")
     
     # 1. Preparação de Entropia
     for i in range(16): header.salt[i] = os.urandom(1)[0]

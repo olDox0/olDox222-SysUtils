@@ -1,3 +1,12 @@
+# --- DOXOADE_NEXUS_SYNC:START ---
+try:
+    from doxoade.commands.macrothon_systems.macrothon_sync import run_silent_sync
+    import os
+    run_silent_sync(os.getcwd())
+except ImportError:
+    pass # Doxoade não instalado neste ambiente
+# --- DOXOADE_NEXUS_SYNC:END ---
+
 # [DOXOADE:VULCAN]
 import os, sys; _b = os.path.join(os.getcwd(), ".doxoade", "vulcan", "bootstrap.py")
 if os.path.exists(_b):

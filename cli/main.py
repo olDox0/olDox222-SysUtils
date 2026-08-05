@@ -1,6 +1,16 @@
+# [DOXOADE:VULCAN]
+# [VULCAN-SKIP] Proteção contra introspecção Click
+import os, sys; _b = os.path.join(os.getcwd(), ".doxoade", "vulcan", "bootstrap.py")
+if os.path.exists(_b):
+    import importlib.util as _u; _s = _u.spec_from_file_location("_vb", _b)
+    _m = _u.module_from_spec(_s); _s.loader.exec_module(_m); _m.ignite(__file__, globals())
+# [/DOXOADE:VULCAN]
+
+# [VULCAN-SKIP] Proteção contra introspecção Click
 # cli/main.py
 import sys
 import os
+import hashlib
 from pathlib import Path
 
 # ------ INJEÇÃO DE PATH ------
@@ -15,6 +25,39 @@ import traceback
 import tempfile
 import subprocess
 from importlib import import_module
+
+def sync_vital_bricks():
+    """Garante que os Bricks do projeto batam com a Versão de Ouro do Acervo."""
+    try:
+        # ✅ Caminho atualizado para o novo nome do módulo
+        from doxoade.core_database import get_db_connection
+        import shutil
+    except ImportError:
+        # Se o Doxoade não estiver instalado, apenas ignora a sincronia silenciosamente
+        return
+    
+    # Mapeamento: {Nome no Acervo: Caminho Local}
+    VITALS = {
+        'vulcan_dict':   'diskdiag/core/vulcan_dict.py',
+        'vulcan_bitmap': 'diskdiag/core/vulcan_bitmap.py'
+    }
+    
+    try:
+        conn = get_db_connection()
+        for name, local_path in VITALS.items():
+            row = conn.execute("SELECT filename FROM moduloid_acervo WHERE name=?", (name,)).fetchone()
+            if not row: continue
+            
+            from doxoade.commands.moduloid_systems.moduloid_acervo import BRICKS_DIR
+            source_brick = BRICKS_DIR / row[0]
+            
+            if not os.path.exists(local_path) or \
+               hashlib.md5(source_brick.read_bytes()).hexdigest() != hashlib.md5(open(local_path, 'rb').read()).hexdigest():
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                shutil.copy2(source_brick, local_path)
+        conn.close()
+    except Exception:
+        pass  # Falha na sincronia não deve impedir o uso da ferramenta
 
 class SysUtilsLazyGroup(click.Group):
     """Orquestrador Zeus: Carrega os submódulos apenas quando invocados."""
@@ -50,12 +93,20 @@ def cli():
     pass
 
 def main():
+    sync_vital_bricks()
     try:
         # Injeção de Path para garantir que os módulos locais sejam achados
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
             
+        if "--no-sync" not in sys.argv:
+            try:
+                # Invoca o motor de sincronia do doxoade
+                from doxoade.commands.macrothon_systems.macrothon_sync import run_sync_logic
+                run_sync_logic(os.getcwd())
+            except: pass 
+        
         cli(obj={})
     except Exception as e:
         # Aciona o Protocolo Lazarus em caso de crash

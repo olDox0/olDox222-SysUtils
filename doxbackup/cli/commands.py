@@ -11,9 +11,15 @@ if os.path.exists(_b):
 import click
 import os
 import time
+import traceback
+from utils.doxcolors import colors, NexusUI
 
 from pathlib import Path
+SYS_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB = str(SYS_ROOT / "data" / "db" / "files.db")
+
 from utils.doxcolors import colors, NexusUI
+
 
 @click.group()
 def cli():
@@ -47,13 +53,14 @@ def pack(source, output, quantum, hint, password):
     # --- INÍCIO DA ANIMAÇÃO ASSÍNCRONA ---
     # Carregamos os frames do arquivo .nxa
     # Se o arquivo não existir, o AsyncAnimation lida graciosamente
-    animation_path = os.path.join("data", "assets", "backup_processing.nxa")
+    animation_path = SYS_ROOT / "data" / "assets" / "backup_processing.nxa" #animation_path = os.path.join("data", "assets", "backup_processing.nxa")
     
     # Se não tiver o arquivo .nxa, podemos usar frames manuais simples
-    frames = NexusUI.load_animation(animation_path) or [" [■□□] ", " [■■□] ", " [■■■] "]
+    frames = NexusUI.load_animation(str(animation_path)) or [" [■□□] ", " [■■□] ", " [■■■] "] #    frames = NexusUI.load_animation(animation_path) or [" [■□□] ", " [■■□] ", " [■■■] "]
 
     click.echo(f"{colors.Fore.CYAN}Preparando compressão de {len(files)} arquivos...{colors.Fore.RESET}")
 
+    success = False
     # O bloco 'with' garante que a animação pare mesmo se o backup falhar
     with colors.AsyncAnimation(frames, interval=0.05, base_color=colors.Fore.PRIMARY) as anim:
         try:
@@ -65,7 +72,10 @@ def pack(source, output, quantum, hint, password):
                 anim.print(f"<{colors.Fore.SUCCESS}>[LOG] Camada de criptografia selada.")
             
         except Exception as e:
-            anim.print(f"<{colors.Fore.ERROR}>[FALHA] Erro crítico: {e}")
+           # EXIBIÇÃO VERBOSA DO ERRO (Chief-Gold Standard)
+            anim.print(f"<{colors.Fore.ERROR}>[FALHA CRÍTICA] {type(e).__name__}: {str(e)}")
+            if "--debug" in sys.argv: # Opcional: mostrar traceback se quiser
+                anim.print(traceback.format_exc())
             success = False
 
     # --- FIM DA ANIMAÇÃO ---

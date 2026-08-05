@@ -1,7 +1,19 @@
+# [DOXOADE:VULCAN]
+# [VULCAN-SKIP] Proteção contra introspecção Click
+import os, sys; _b = os.path.join(os.getcwd(), ".doxoade", "vulcan", "bootstrap.py")
+if os.path.exists(_b):
+    import importlib.util as _u; _s = _u.spec_from_file_location("_vb", _b)
+    _m = _u.module_from_spec(_s); _s.loader.exec_module(_m); _m.ignite(__file__, globals())
+# [/DOXOADE:VULCAN]
+
+# [VULCAN-SKIP] Proteção contra introspecção Click
 # sysdiag/cli/commands.py
 import click
+import subprocess
+
 from sysdiag.core import os_optimizer
 from sysdiag.platform.windows import registry_tweaks
+from utils.doxcolors import colors, NexusUI
 
 @click.group()
 def cli():
@@ -66,16 +78,31 @@ def startup():
 @cli.command()
 def maintenance():
     """Limpeza profunda de componentes do Windows (WinSxS e Logs)."""
-    import subprocess
-    click.secho("[VULCAN] Iniciando Manutenção de Componentes...", fg="cyan")
+    NexusUI.decode_effect("INICIANDO MANUTENÇÃO VULCAN", duration=1.0)
     
-    # 1. Limpeza da pasta WinSxS (Onde o Windows guarda atualizações velhas)
-    click.echo("  -> Limpando base de componentes (DISM)...")
-    subprocess.run("dism /online /cleanup-image /startcomponentcleanup", shell=True)
+    # 1. Limpeza WinSxS (Base de componentes)
+    click.echo(f"\n{colors.Fore.PRIMARY}[1/2] Analisando base de componentes (WinSxS)...{colors.Fore.RESET}")
+    click.echo(f"{colors.Fore.DIM}Isso removerá versões obsoletas de atualizações do Windows.{colors.Fore.RESET}")
     
-    # 2. Limpeza de Logs de Eventos do Windows
-    click.echo("  -> Limpando logs de eventos acumulados...")
+    # Rodamos o DISM (requer admin)
+    # /StartComponentCleanup: limpa versões antigas
+    # /ResetBase: torna a limpeza permanente (economiza mais espaço)
+    cmd_dism = "dism /online /cleanup-image /startcomponentcleanup"
+    try:
+        subprocess.run(cmd_dism, shell=True, check=True)
+        click.secho("  [OK] Componentes otimizados.", fg="green")
+    except Exception as e:
+        click.secho(f"  [FALHA] DISM requer privilégios de Administrador.", fg="red")
+
+    # 2. Limpeza de Logs de Eventos
+    click.echo(f"\n{colors.Fore.PRIMARY}[2/2] Limpando Logs de Eventos do Windows...{colors.Fore.RESET}")
     ps_cmd = 'wevtutil el | Foreach-Object {wevtutil cl "$_"}'
-    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
-    
-    click.secho("[SUCESSO] Espaço em disco e performance de I/O recuperados.", fg="green", bold=True)
+    try:
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, check=True)
+        click.secho("  [OK] Logs de eventos limpos.", fg="green")
+    except:
+        click.secho("  [FALHA] Não foi possível limpar os logs.", fg="red")
+
+    click.echo("\n" + "="*60)
+    click.echo(NexusUI.gradient_text("MANUTENÇÃO DE SISTEMA CONCLUÍDA"))
+    click.echo("="*60)

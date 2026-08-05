@@ -2,11 +2,12 @@
 # ────────────────────────────────────────────────────────────
 # NEXUS UI ENGINE (Embedded Version)
 # Sincronizado por: Doxoade Control
-# Data: 2026-04-25 19:05:55
+# Data: 2026-04-26 16:18:27
 # Projeto Alvo: Projeto SysUtils
 # Compliance: MPoT-1, PASC-6.4 (High-Performance UI)
 # ────────────────────────────────────────────────────────────
 
+# doxoade/doxoade/tools/doxcolors.py
 """
 Doxcolors Nexus Edition – High-Performance CLI UI Engine
 Versão: 2.0 (Nexus UI)
@@ -402,3 +403,11 @@ class DoxColors:
     rgb = staticmethod(rgb); hex = staticmethod(hex_to_ansi)
     AsyncAnimation = AsyncAnimation
 colors = DoxColors
+
+def init(*args, **kwargs):
+    """
+    Função de compatibilidade (Stub) para transição do Colorama.
+    O Doxcolors Nexus auto-inicializa o suporte ANSI no Windows e Linux,
+    tornando chamadas manuais de init() obsoletas.
+    """
+    pass
