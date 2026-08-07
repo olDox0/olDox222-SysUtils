@@ -80,3 +80,6 @@ thirdparty/w64devkit/
 # Exceções (Auto-fixed pelo Doxoade)
 !requirements.txt
 !PipelineHelp.txt
+
+# --- Auto-Quarentena Doxoade Guardian ---
+./data/db/files.db
