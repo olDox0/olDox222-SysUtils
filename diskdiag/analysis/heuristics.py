@@ -29,13 +29,21 @@ BACKUP_IGNORE_EXT = {
     ".pyc", ".pyd", ".obj", ".node", ".dox", ".iso", ".bin"
 }
 
+BACKUP_EXCEPTIONS = {".GITIGNORE", ".GITATTRIBUTES", ".GITMODULES"}
+
 def should_exclude_from_backup(path):
     """Retorna True se o caminho bater com algum padrão de exclusão."""
+
+    filename = os.path.basename(path).upper()
+    if filename in BACKUP_EXCEPTIONS:
+        return False
+        
     path_up = path.upper()
     parts = path_up.replace("/", "\\").split("\\")
     
     # 1. Verifica se alguma pasta no caminho está na lista negra
-    if any(p in GLOBAL_EXCLUDE_DIRS for p in parts):
+    #if any(p in GLOBAL_EXCLUDE_DIRS for p in parts):
+    if any(part in NON_BACKUP_PATTERNS for part in parts):
         return True
             
     # 2. Verifica extensão

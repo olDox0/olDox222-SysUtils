@@ -18,7 +18,7 @@ def analyze_crash(traceback_text):
     return info
 
 def activate_protocol(error_text):
-    click.clear()
+    #click.clear()
     print(Fore.RED + Style.BRIGHT + "!" * 60)
     print("   [SISTEMA RESGATE: PROTOCOLO LAZARUS ATIVADO]")
     print("!" * 60)

@@ -1,0 +1,49 @@
+[project]
+name = "sysutils"
+version = "3.0.0"
+type = "native-toolchain"
+
+[compiler]
+engine = "gcc"
+std = "c11"
+opt = "O3"
+shield = true
+incremental = true
+flags = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
+
+[paths]
+sources = ["src/native/*.c"]
+headers = ["src/native/include/"]
+output  = "bin/"
+
+# ═══════════════════════════════════════════════════════════════
+# ALVOS DE COMPILAÇÃO (TARGETS) — Todos são DLLs, não executáveis
+# ═══════════════════════════════════════════════════════════════
+
+[[targets]]
+name = "dox_packer"
+type = "executable"
+sources = ["src/native/dox_packer.c"]
+output = "bin/dox_packer.exe"
+libs = []
+
+[[targets]]
+name = "vulcan_cleaner"
+type = "shared-library"
+sources = ["src/native/vulcan_cleaner.c"]
+output = "bin/vulcan_cleaner.dll"
+libs = ["kernel32"]
+
+[[targets]]
+name = "vulcan_ram"
+type = "shared-library"
+sources = ["src/native/vulcan_ram.c"]
+output = "bin/vulcan_ram.dll"
+libs = ["psapi"]
+
+[[targets]]
+name = "vulcan_dox"
+type = "shared-library"
+sources = ["engine/native/dox_packer.c"]
+output = "bin/vulcan_dox.dll"
+libs = ["kernel32"]

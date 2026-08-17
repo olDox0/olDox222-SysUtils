@@ -83,3 +83,15 @@ thirdparty/w64devkit/
 
 # --- Auto-Quarentena Doxoade Guardian ---
 ./data/db/files.db
+
+# ====== C/C++ (Metalcraft & Native) ======
+*.o
+*.obj
+*.exe
+*.dll
+*.dylib
+*.lib
+*.out
+*.app
+bin/
+obj/

@@ -6,8 +6,8 @@ FOLDERS_EXCLUDE = {
     'NODE_MODULES', 'VENV', '.VENV', 'THIRDPARTY', '__PYCACHE__',
     'BUILD', 'DIST', 'BIN', 'OBJ', '.GIT', '.DOXOADE', '.DOXOADE_CACHE',
     '.VSCODE', '.IDEA', '$RECYCLE.BIN', 'SYSTEM VOLUME INFORMATION', 
-    'TEMP', 'TMP', '.PYTEST_CACHE', 'EGG-INFO', 'VERS', '.DOXOADE',
-    'DATA',
+    'TEMP', 'TMP', '.PYTEST_CACHE', 'EGG-INFO', 'VERS',
+    'DATA', 'BACKUP_EXTRACTED',  # <-- Adicionar aqui
 }
 
 EXT_EXCLUDE = {
@@ -34,21 +34,14 @@ def is_ignored_extension(ext: str) -> bool:
     return clean_ext in EXT_EXCLUDE
 
 def should_exclude_path(full_path: str) -> bool:
-    """Verifica recursivamente se o arquivo ou alguma pasta pai deve ser ignorada."""
     path_up = os.path.abspath(full_path).upper()
-    
-    # 1. Verifica Extensão (usando a função normalizada)
     _, ext = os.path.splitext(path_up)
     if is_ignored_extension(ext):
         return True
-        
-    # 2. Verifica se qualquer parte do caminho é uma pasta proibida
-    # Substituímos separadores para garantir compatibilidade Windows/Unix
     parts = path_up.replace("/", "\\").split("\\")
     for part in parts:
         if part in FOLDERS_EXCLUDE:
             return True
-            
     return False
 
 def normalize_path(path: str) -> str:
