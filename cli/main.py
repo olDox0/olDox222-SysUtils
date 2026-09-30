@@ -75,14 +75,15 @@ class SysUtilsLazyGroup(click.Group):
         super().__init__(*args, **kwargs)
         # ═══ COMANDOS LOCAIS DO PROJETO (PRIORIDADE MÁXIMA) ═══
         self._lazy_map = {
-            'disk':   'diskdiag.cli.commands:cli',
-            'ram':    'ramdiag.cli.commands:cli',
-            'backup': 'doxbackup.cli.commands:cli',
-            'bloat':  'bloatbreaker.cli.commands:cli',
-            'win':    'sysdiag.cli.commands:cli',
-            'net':    'netdiag.cli.commands:cli',
-            'verify': 'doxbackup.core.verify:cli',
-            'sync':   'syncdiag.cli.commands:cli',
+            'disk':  'diskdiag.cli.commands:cli',
+            'ram':   'ramdiag.cli.commands:cli',
+            'backup':'doxbackup.cli.commands:cli',
+            'bloat': 'bloatbreaker.cli.commands:cli',
+            'win':   'sysdiag.cli.commands:cli',
+            'net':   'netdiag.cli.commands:cli',
+            'verify':'doxbackup.core.verify:cli',
+            'sync':  'syncdiag.cli.commands:cli',
+            'leap':  'sysutils.leap_sys.cli.cmd_leap:cli',
         }
         # ═══ COMANDOS DOXOADE PORTADOS (PRIORIDADE SECUNDÁRIA) ═══
         self._ported_map = self._load_ported_commands()

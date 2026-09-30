@@ -47,3 +47,10 @@ type = "shared-library"
 sources = ["engine/native/dox_packer.c"]
 output = "bin/vulcan_dox.dll"
 libs = ["kernel32"]
+
+[[targets]]
+name = "leap_native"
+type = "executable"
+sources = ["sysutils/leap_sys/leap_engine/leap_c_integration.c"]
+output = "bin/input-leap/leap_native.exe"
+libs = ["ws2_32", "user32"]
