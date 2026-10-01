@@ -95,33 +95,23 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
 
 @cli.command("join")
 @click.argument("server_target", required=False)
+@click.option("--name", default=None, help="Nome de tela registrado no servidor (ex: bluebaby).")
 @click.option("--port", default=24800, show_default=True, help="Porta do servidor.")
-def cmd_join(server_target: str | None, port: int):
+def cmd_join(server_target: str | None, name: str | None, port: int):
     """Conecta este PC como CLIENTE (receberá os comandos de mouse/teclado)."""
     if not leap_installer.is_installed():
-        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
-        ok, msg = leap_installer.ensure_binaries()
-        if not ok:
-            click.secho(f"[ERRO] {msg}", fg="red")
-            raise click.Abort()
+        leap_installer.ensure_binaries()
 
-    client_host = socket.gethostname()
+    # Se --name não foi passado, usa 'bluebaby' se for DESKTOP-5NP5BHE, ou o hostname local
+    client_host = name or ("bluebaby" if "desktop-" in socket.gethostname().lower() else socket.gethostname())
 
     if not server_target:
-        click.secho("[*] Escaneando rede local em busca do Servidor Input Leap...", fg="cyan")
-        detected = leap_discovery.discover_server(port=port)
-        if detected:
-            click.secho(f"[!] Servidor localizado em: {detected}", fg="green")
-            if click.confirm(f"Deseja conectar a {detected}?", default=True):
-                server_target = detected
-        if not server_target:
-            server_target = click.prompt("Digite o IP ou Hostname do Servidor (PC Amaranth)")
+        server_target = click.prompt("Digite o IP do Servidor (PC Amaranth)")
 
-    click.secho(f"[*] Conectando [{client_host}] ao servidor {server_target}:{port}...", fg="cyan")
+    click.secho(f"[*] Conectando com nome de tela [{client_host}] ao servidor {server_target}:{port}...", fg="cyan")
     success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
     if success:
-        click.secho("[OK] Cliente Input Leap iniciado em background!", fg="green", bold=True)
-        click.echo("Aguardando o cursor atravessar a borda da tela.")
+        click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
     else:
         click.secho(f"[FALHA] {log}", fg="red")
 
@@ -149,3 +139,17 @@ def cmd_stop():
         click.secho(f"[OK] {killed} processo(s) do Input Leap finalizado(s).", fg="green")
     else:
         click.echo("[INFO] Nenhum processo ativo encontrado.")
+
+@cli.command("firewall")
+def cmd_firewall():
+    """Autoriza e cadastra as regras do LeapSys no Firewall do Windows (Requer Admin)."""
+    from sysutils.leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
+    if not leap_elevation.is_admin():
+        click.secho("[AVISO] Abra o terminal como Administrador para aplicar as regras no Firewall.", fg="yellow", bold=True)
+    click.secho("[*] Cadastrando regras de liberação no Firewall do Windows...", fg="cyan")
+    ok, logs = leap_firewall.authorize_firewall()
+    for l in logs:
+        click.echo(f"  {l}")
+    if ok:
+        click.secho("[SUCESSO] Firewall do Windows totalmente autorizado para o LeapSys.", fg="green", bold=True)
+
