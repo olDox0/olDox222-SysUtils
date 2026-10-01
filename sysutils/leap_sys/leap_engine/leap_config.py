@@ -19,33 +19,27 @@ def generate_conf_content(
     }
     dir_server_to_client, dir_client_to_server = dir_map.get(position, ("right", "left"))
 
-    # Deduplicação rigorosa: garante que nenhuma tela seja declarada duas vezes
-    # e que o cliente nunca seja igual ao servidor
-    candidates = [client_name, "bluebaby", "DESKTOP-5NP5BHE"]
-    valid_clients = []
-    for name in candidates:
-        if name != server_name and name not in valid_clients:
-            valid_clients.append(name)
-
-    screens_block = f"\t{server_name}:\n"
-    for cl in valid_clients:
-        screens_block += f"\t{cl}:\n"
-
-    links_block = f"\t{server_name}:\n"
-    for cl in valid_clients:
-        links_block += f"\t\t{dir_server_to_client} = {cl}\n"
-    for cl in valid_clients:
-        links_block += f"\t{cl}:\n\t\t{dir_client_to_server} = {server_name}\n"
-
+    # Configuração com Aliases: aceita 'bluebaby' e 'DESKTOP-5NP5BHE' para a mesma tela
     conf = f"""# ==============================================================================
-# LEAP SYS CONFIGURATION FILE (Deduplicado e Seguro)
+# LEAP SYS CONFIGURATION FILE (Aliases Nativos)
 # ==============================================================================
 
 section: screens
-{screens_block}end
+\t{server_name}:
+\tbluebaby:
+end
+
+section: aliases
+\tbluebaby:
+\t\tDESKTOP-5NP5BHE
+end
 
 section: links
-{links_block}end
+\t{server_name}:
+\t\t{dir_server_to_client} = bluebaby
+\tbluebaby:
+\t\t{dir_client_to_server} = {server_name}
+end
 
 section: options
 \theartbeat = 5000
