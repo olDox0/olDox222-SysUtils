@@ -18,19 +18,19 @@ BIN_DIR = PROJECT_ROOT / "bin" / "input-leap"
 SYSTEM_SEARCH_DIRS = [
     BIN_DIR,  # <- Prioridade máxima para o Silo local do projeto
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Deskflow",
+    Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "BarriSYSTEM_SEARCH_DIRS = [
+    BIN_DIR,  # <- Prioridade 1: sempre usar os binários portáteis do projeto!
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Barrier",
-    Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Deskflow",
-    Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Barrier",
+    Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Deskflow",
+]
+
+# E garanta que barrierc.exe vem antes de deskflow-core.exe:
+CLIENT_NAMES = [
+    "barrierc.exe", "input-leapc.exe", "deskflow-client.exe", "deskflow-core.exe"
 ]
 
 SERVER_NAMES = [
-    "deskflow-core.exe", "deskflow-server.exe", "deskflow.exe",
-    "barriers.exe", "barrier.exe", "input-leaps.exe", "leap_native_server.exe"
-]
-
-CLIENT_NAMES = [
-    "deskflow-core.exe", "deskflow-client.exe",
-    "barrierc.exe", "input-leapc.exe", "leap_native_client.exe"
+    "barriers.exe", "barrier.exe", "input-leaps.exe", "deskflow-server.exe", "deskflow-core.exe"
 ]
 
 BARRIER_RELEASE_URL = (
