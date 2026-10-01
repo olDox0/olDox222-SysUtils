@@ -14,11 +14,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BIN_DIR = PROJECT_ROOT / "bin" / "input-leap"
 
-# Possíveis locais de instalação padrão no Windows
+# Coloque BIN_DIR como primeiro item absoluto:
 SYSTEM_SEARCH_DIRS = [
-    BIN_DIR,  # <- Prioridade máxima para o Silo local do projeto
-    Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Deskflow",
-    Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "BarriSYSTEM_SEARCH_DIRS = [
     BIN_DIR,  # <- Prioridade 1: sempre usar os binários portáteis do projeto!
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Barrier",
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Deskflow",
