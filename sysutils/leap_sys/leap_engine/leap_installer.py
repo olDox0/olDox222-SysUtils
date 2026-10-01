@@ -16,11 +16,11 @@ BIN_DIR = PROJECT_ROOT / "bin" / "input-leap"
 
 # Possíveis locais de instalação padrão no Windows
 SYSTEM_SEARCH_DIRS = [
+    BIN_DIR,  # <- Prioridade máxima para o Silo local do projeto
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Deskflow",
     Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Barrier",
     Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Deskflow",
     Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Barrier",
-    BIN_DIR
 ]
 
 SERVER_NAMES = [
