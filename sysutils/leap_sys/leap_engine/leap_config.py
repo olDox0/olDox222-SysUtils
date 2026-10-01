@@ -11,10 +11,6 @@ def generate_conf_content(
     client_name: str,
     position: str = "right"
 ) -> str:
-    """
-    Gera o texto de configuração com links bidirecionais entre Server e Client.
-    """
-    # Mapeamento bidirecional da transição de bordas
     dir_map = {
         "right": ("right", "left"),
         "left":  ("left", "right"),
@@ -23,33 +19,33 @@ def generate_conf_content(
     }
     dir_server_to_client, dir_client_to_server = dir_map.get(position, ("right", "left"))
 
+    # Deduplicação rigorosa: garante que nenhuma tela seja declarada duas vezes
+    # e que o cliente nunca seja igual ao servidor
+    candidates = [client_name, "bluebaby", "DESKTOP-5NP5BHE"]
+    valid_clients = []
+    for name in candidates:
+        if name != server_name and name not in valid_clients:
+            valid_clients.append(name)
+
+    screens_block = f"\t{server_name}:\n"
+    for cl in valid_clients:
+        screens_block += f"\t{cl}:\n"
+
+    links_block = f"\t{server_name}:\n"
+    for cl in valid_clients:
+        links_block += f"\t\t{dir_server_to_client} = {cl}\n"
+    for cl in valid_clients:
+        links_block += f"\t{cl}:\n\t\t{dir_client_to_server} = {server_name}\n"
+
     conf = f"""# ==============================================================================
-# LEAP SYS CONFIGURATION FILE (Gerado automaticamente pelo SysUtils)
+# LEAP SYS CONFIGURATION FILE (Deduplicado e Seguro)
 # ==============================================================================
 
 section: screens
-\t{server_name}:
-\t\thalfDuplexCapsLock = false
-\t\thalfDuplexNumLock = false
-\t\thalfDuplexScrollLock = false
-\t\txtestIsXineramaUnaware = false
-\t\tswitchCorners = none
-\t\tswitchCornerSize = 0
-\t{client_name}:
-\t\thalfDuplexCapsLock = false
-\t\thalfDuplexNumLock = false
-\t\thalfDuplexScrollLock = false
-\t\txtestIsXineramaUnaware = false
-\t\tswitchCorners = none
-\t\tswitchCornerSize = 0
-end
+{screens_block}end
 
 section: links
-\t{server_name}:
-\t\t{dir_server_to_client} = {client_name}
-\t{client_name}:
-\t\t{dir_client_to_server} = {server_name}
-end
+{links_block}end
 
 section: options
 \theartbeat = 5000
