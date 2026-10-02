@@ -176,3 +176,16 @@ def cmd_firewall():
     if ok:
         click.secho("[SUCESSO] Firewall do Windows totalmente autorizado para o LeapSys.", fg="green", bold=True)
 
+@cli.command("setup-ux")
+def cmd_setup_ux():
+    """⚡ Configura a UX Soberana: Atalho com Elevação Automática para o Leap/KVM."""
+    click.secho("[*] Forjando Atalho Soberano na Área de Trabalho...", fg="cyan")
+    ok, msg = leap_elevation.create_sovereign_shortcut()
+    if ok:
+        click.secho(f"✔ [SUCESSO] {msg}", fg="green", bold=True)
+        click.secho("💡 Fixe este atalho na sua Barra de Tarefas. O Windows pedirá UAC automaticamente.", fg="yellow")
+        click.secho("   O Leap/KVM funcionará perfeitamente sem travamentos de mouse/teclado.", fg="yellow")
+    else:
+        click.secho(f"❌ [FALHA] {msg}", fg="red", bold=True)
+
+
