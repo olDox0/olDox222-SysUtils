@@ -9,6 +9,7 @@ Comandos:
   - stop:  Encerra daemons do Input Leap.
 """
 from __future__ import annotations
+import os
 import click
 import socket
 import psutil
@@ -37,6 +38,18 @@ def cmd_setup(force: bool):
     else:
         click.secho(f"[ERRO] {msg}", fg="red", bold=True)
         raise click.Abort()
+
+    # ⚔️ ARES: Auto-Configuração de UX para o Editor (Zero-Touch)
+    if os.name == 'nt':
+        from sysutils.leap_sys.leap_platform.leap_windows import leap_elevation
+        click.secho("\n[*] Configurando permissões de Hook para o Editor (Doxly/Lite XL)...", fg="cyan")
+        ok_elev, msg_elev = leap_elevation.ensure_litexl_admin_elevation()
+        if ok_elev:
+            click.secho(f"✔ [ARES] {msg_elev}", fg="green")
+            click.secho("  💡 O editor agora solicitará elevação (UAC) automaticamente ao abrir pelo ícone,", fg="yellow")
+            click.secho("     garantindo que o Leap/KVM funcione sem travamentos de mouse/teclado.", fg="yellow")
+        else:
+            click.secho(f"⚠ [AVISO] {msg_elev}", fg="yellow")
 
 @cli.command("host")
 @click.option("--client", default=None, help="Hostname ou apelido do computador cliente (ex: bluebaby).")
@@ -100,20 +113,30 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
 def cmd_join(server_target: str | None, name: str | None, port: int):
     """Conecta este PC como CLIENTE (receberá os comandos de mouse/teclado)."""
     if not leap_installer.is_installed():
-        leap_installer.ensure_binaries()
+        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
+        ok, msg = leap_installer.ensure_binaries()
+        if not ok:
+            click.secho(f"[ERRO] {msg}", fg="red")
+            raise click.Abort()
 
-    # Se --name não foi passado, usa 'bluebaby' se for DESKTOP-5NP5BHE, ou o hostname local
-    client_host = name or ("bluebaby" if "desktop-" in socket.gethostname().lower() else socket.gethostname())
-
+    # 🛡️ BLINDAGEM: Força o nome 'bluebaby' se não for explicitado, garantindo match com o Host
+    client_host = name or "bluebaby"
+    
+    # 🛡️ BLINDAGEM: Evita click.prompt em background. Se não houver IP, falha com instrução clara.
     if not server_target:
-        server_target = click.prompt("Digite o IP do Servidor (PC Amaranth)")
+        click.secho("[ERRO] IP do servidor (Amaranth) é obrigatório para execução em background.", fg="red", bold=True)
+        click.secho("Uso correto: sysutils leap join 192.168.18.52 --name bluebaby", fg="yellow")
+        raise click.Abort()
 
-    click.secho(f"[*] Conectando com nome de tela [{client_host}] ao servidor {server_target}:{port}...", fg="cyan")
+    click.secho(f"[*] Conectando com nome de tela [{click.style(client_host, bold=True)}] ao servidor {server_target}:{port}...", fg="cyan")
+    
     success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
+    
     if success:
         click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
     else:
-        click.secho(f"[FALHA] {log}", fg="red")
+        click.secho(f"[FALHA] {log}", fg="red", bold=True)
+        click.secho("💡 Dica: Verifique se o Firewall do Windows no Amaranth permite a porta 24800.", fg="yellow")
 
 @cli.command("status")
 def cmd_status():
