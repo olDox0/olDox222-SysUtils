@@ -51,6 +51,7 @@ libs = ["kernel32"]
 [[targets]]
 name = "leap_native"
 type = "executable"
-sources = ["sysutils/leap_sys/leap_engine/leap_c_integration.c"]
+sources = ["leap_sys/leap_engine/leap_c_integration.c"] # <-- sem o prefixo sysutils/
 output = "bin/input-leap/leap_native.exe"
 libs = ["ws2_32", "user32"]
+

@@ -6,7 +6,7 @@ Registra regras de porta (24800) e regras diretas para os binários.
 from __future__ import annotations
 import subprocess
 from pathlib import Path
-from sysutils.leap_sys.leap_engine import leap_installer
+from leap_sys.leap_engine import leap_installer
 
 def authorize_firewall(port: int = 24800) -> tuple[bool, list[str]]:
     """

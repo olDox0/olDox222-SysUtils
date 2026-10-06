@@ -1,96 +1,134 @@
 # syncdiag/core/robocopy_engine.py
-"""
-Motor de sincronização one-way (mirror) via Robocopy.
-
-Encapsula a chamada ao Robocopy nativo do Windows, incluindo a
-decodificação da tabela de exit codes (bitmask, não convencional).
-"""
+from __future__ import annotations
 import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
 
-# Robocopy usa exit codes como soma de bits:
-#   0  = nada copiado, origem e destino já batiam
-#   1  = arquivo(s) copiado(s) com sucesso
-#   2  = arquivos extras no destino foram removidos (efeito do /MIR)
-#   4  = alguns arquivos/pastas com mismatch (não puderam ser copiados)
-#   8  = falha ao copiar alguns arquivos — checar o log
-#   16 = erro fatal, robocopy não conseguiu nem iniciar
+# Exclusões fundamentais para sincronização de repositórios/código entre máquinas distintas
+DEFAULT_EXCLUDE_DIRS = [
+    "venv", ".venv", "__pycache__", ".git", "node_modules",
+    ".doxoade", ".doxoade_cache", ".pytest_cache", "build", "dist",
+    "$RECYCLE.BIN", "System Volume Information"
+]
+
+DEFAULT_EXCLUDE_FILES = [
+    "*.pyc", "*.pyo", "*.tmp", "*.bak", "*.swp", "*.lock",
+    "thumbs.db", "desktop.ini", "*.db-wal", "*.db-shm"
+]
+
 _BIT_MEANINGS = {
-    1: "arquivo(s) copiado(s) com sucesso",
+    1: "arquivos copiados com sucesso",
     2: "arquivos extras removidos do destino (mirror)",
-    4: "alguns itens não puderam ser copiados (mismatch)",
+    4: "mismatches detectados",
 }
 
-
 def describe_exit_code(code: int) -> str:
-    """Traduz o exit code do Robocopy em uma descrição legível."""
     if code >= 16:
-        return "ERRO FATAL: robocopy não conseguiu acessar origem/destino."
+        return "ERRO FATAL: Robocopy não conseguiu acessar origem ou destino."
     if code >= 8:
-        return "FALHA: um ou mais arquivos não puderam ser copiados. Veja o log."
+        return "FALHA: Um ou mais arquivos não puderam ser copiados. Verifique permissões."
     if code == 0:
-        return "Nada a fazer: origem e destino já estavam sincronizados."
+        return "Tudo atualizado: Origem e destino já estavam 100% sincronizados."
     parts = [msg for bit, msg in _BIT_MEANINGS.items() if code & bit]
-    return "; ".join(parts) if parts else f"Código {code} (não mapeado)."
-
+    return "; ".join(parts) if parts else f"Sincronização finalizada (Código {code})."
 
 def build_command(
     origem: str,
     destino: str,
     log_path: Path,
     threads: int = 16,
-    retries: int = 3,
-    wait: int = 5,
+    retries: int = 2,
+    wait: int = 3,
     dry_run: bool = False,
-    excludes: Optional[List[str]] = None,
+    excludes_dir: Optional[List[str]] = None,
+    excludes_file: Optional[List[str]] = None,
 ) -> List[str]:
-    """Monta a linha de comando do robocopy. Não executa nada."""
     cmd = [
-        "robocopy", origem, destino,
-        "/MIR", "/Z",
-        f"/MT:{threads}",
-        f"/R:{retries}", f"/W:{wait}",
-        f"/LOG:{log_path}", "/TEE", "/NP",
+        "robocopy",
+        origem,
+        destino,
+        "/MIR",           # Espelhamento (cria, atualiza e remove órfãos no destino)
+        "/FFT",           # Tolerância de 2s nos timestamps (essencial para SMB/Windows)
+        f"/MT:{threads}", # Multi-threading para throughput máximo
+        f"/R:{retries}",  # Máximo de tentativas em arquivos bloqueados
+        f"/W:{wait}",     # Espera entre retentativas em segundos
+        f"/LOG:{log_path}", # Salva log completo em disco
+        "/TEE",           # Mostra o log no console em tempo real
+        "/NP",            # Remove porcentagens poluídas no terminal
     ]
+
     if dry_run:
         cmd.append("/L")
-    if excludes:
-        cmd.append("/XD")
-        cmd.extend(excludes)
-    return cmd
 
+    # Diretórios ignorados
+    all_xd = list(DEFAULT_EXCLUDE_DIRS)
+    if excludes_dir:
+        all_xd.extend(excludes_dir)
+    cmd.append("/XD")
+    cmd.extend(list(set(all_xd)))
+
+    # Arquivos ignorados
+    all_xf = list(DEFAULT_EXCLUDE_FILES)
+    if excludes_file:
+        all_xf.extend(excludes_file)
+    cmd.append("/XF")
+    cmd.extend(list(set(all_xf)))
+
+    return cmd
 
 def run_mirror(
     origem: str,
     destino: str,
     log_dir: Path,
     threads: int = 16,
-    retries: int = 3,
-    wait: int = 5,
+    retries: int = 2,
+    wait: int = 3,
     dry_run: bool = False,
-    excludes: Optional[List[str]] = None,
+    excludes_dir: Optional[List[str]] = None,
+    excludes_file: Optional[List[str]] = None,
 ) -> Dict:
-    """
-    Executa o mirror via Robocopy e retorna um dicionário com o resultado.
-    Nunca levanta exceção por falha do robocopy em si (exit code >= 8);
-    quem chama decide o que fazer com `result["success"]`.
-    """
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"sync_{timestamp}.log"
 
-    cmd = build_command(origem, destino, log_path, threads, retries, wait, dry_run, excludes)
+    cmd = build_command(
+        origem=origem,
+        destino=destino,
+        log_path=log_path,
+        threads=threads,
+        retries=retries,
+        wait=wait,
+        dry_run=dry_run,
+        excludes_dir=excludes_dir,
+        excludes_file=excludes_file,
+    )
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Execução com streaming em tempo real: o terminal não trava durante o processo
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace"
+    )
+
+    for line in iter(proc.stdout.readline, ''):
+        clean = line.strip()
+        if clean and not clean.startswith("-------------------------------------------------------------------------------"):
+            print(f"  [ROBOCOPY] {clean}")
+            sys.stdout.flush()
+
+    proc.stdout.close()
+    return_code = proc.wait()
 
     return {
-        "exit_code": proc.returncode,
-        "success": proc.returncode < 8,
-        "description": describe_exit_code(proc.returncode),
+        "exit_code": return_code,
+        "success": return_code < 8,
+        "description": describe_exit_code(return_code),
         "log_path": str(log_path),
         "cmd": " ".join(cmd),
         "dry_run": dry_run,
-        "stdout_tail": proc.stdout[-2000:] if proc.stdout else "",
     }

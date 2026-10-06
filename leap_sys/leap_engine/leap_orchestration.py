@@ -5,7 +5,7 @@ Atena: Orquestrador da ponte de execução, logs e lifecycle do Leap Sys.
 from __future__ import annotations
 import time
 from pathlib import Path
-from sysutils.leap_sys.leap_engine import leap_daemon, leap_config
+from leap_sys.leap_engine import leap_daemon, leap_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data" / "leap"

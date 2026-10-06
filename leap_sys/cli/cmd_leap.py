@@ -1,30 +1,23 @@
-# sysutils/leap_sys/cli/cmd_leap.py
-"""
-Interface de Linha de Comando (CLI) para LeapSys / Input Leap.
-Comandos:
-  - setup: Baixa/valida os binários portáteis headless (leaps/leapc).
-  - host:  Inicia modo Servidor (computador onde o mouse/teclado físicos estão).
-  - join:  Inicia modo Cliente (computador que recebe o cursor).
-  - status: Verifica processos ativos e conectividade.
-  - stop:  Encerra daemons do Input Leap.
-"""
+# leap_sys/cli/cmd_leap.py
 from __future__ import annotations
 import os
-import click
 import socket
+import click
+import json
+import time
 import psutil
 from pathlib import Path
-from sysutils.leap_sys.leap_engine import (
+from leap_sys.leap_engine import (
     leap_installer,
     leap_orchestration,
     leap_daemon,
     leap_discovery
 )
-from sysutils.leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
+from leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
 
 @click.group(name="leap")
 def cli():
-    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap Engine)."""
+    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
     pass
 
 @cli.command("setup")
@@ -39,9 +32,7 @@ def cmd_setup(force: bool):
         click.secho(f"[ERRO] {msg}", fg="red", bold=True)
         raise click.Abort()
 
-    # ⚔️ ARES: Auto-Configuração de UX para o Editor (Zero-Touch)
     if os.name == 'nt':
-        from sysutils.leap_sys.leap_platform.leap_windows import leap_elevation
         click.secho("\n[*] Configurando permissões de Hook para o Editor (Doxly/Lite XL)...", fg="cyan")
         ok_elev, msg_elev = leap_elevation.ensure_litexl_admin_elevation()
         if ok_elev:
@@ -62,7 +53,6 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
     server_host = socket.gethostname()
 
     def _get_local_ips() -> list[tuple[str, str]]:
-        """Descobre interfaces de rede e seus IPs v4 ativos."""
         ips = []
         for iface, addrs in psutil.net_if_addrs().items():
             for addr in addrs:
@@ -70,7 +60,6 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
                     ips.append((iface, addr.address))
         return ips
 
-    # Validação dos binários
     if not leap_installer.is_installed():
         click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
         ok, msg = leap_installer.ensure_binaries()
@@ -78,12 +67,10 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
             click.secho(f"[ERRO] {msg}", fg="red")
             raise click.Abort()
 
-    # Assistente caso client não tenha sido fornecido
     if not client:
         click.echo(f"Computador Servidor atual: {click.style(server_host, bold=True, fg='cyan')}")
         client = click.prompt("Nome do computador cliente de destino (ex: bluebaby)")
 
-    # Firewall
     if not no_firewall:
         if not leap_firewall.is_port_open(port):
             click.secho(f"[*] Porta {port} fechada no Firewall do Windows. Solicitando liberação...", fg="yellow")
@@ -103,6 +90,13 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
         click.echo("----------------------------------------")
         click.echo(f"👉 No outro computador ({client}), execute:")
         click.secho(f"   sysutils leap join <IP_ESCOLHIDO_ACIMA> --port {port}\n", fg="yellow", bold=True)
+        _update_leap_state(
+          active=True, 
+          mode="host", 
+          target=client, 
+          server_ip="192.168.18.52", 
+          port=port
+        )
     else:
         click.secho(f"[FALHA] {log}", fg="red")
 
@@ -119,24 +113,27 @@ def cmd_join(server_target: str | None, name: str | None, port: int):
             click.secho(f"[ERRO] {msg}", fg="red")
             raise click.Abort()
 
-    # 🛡️ BLINDAGEM: Força o nome 'bluebaby' se não for explicitado, garantindo match com o Host
     client_host = name or "bluebaby"
-    
-    # 🛡️ BLINDAGEM: Evita click.prompt em background. Se não houver IP, falha com instrução clara.
+
     if not server_target:
         click.secho("[ERRO] IP do servidor (Amaranth) é obrigatório para execução em background.", fg="red", bold=True)
         click.secho("Uso correto: sysutils leap join 192.168.18.52 --name bluebaby", fg="yellow")
         raise click.Abort()
 
     click.secho(f"[*] Conectando com nome de tela [{click.style(client_host, bold=True)}] ao servidor {server_target}:{port}...", fg="cyan")
-    
     success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
-    
     if success:
         click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
+        _update_leap_state(
+          active=True, 
+          mode="client", 
+          target=server_target, 
+          server_ip=server_target, 
+          port=port
+        )
     else:
         click.secho(f"[FALHA] {log}", fg="red", bold=True)
-        click.secho("💡 Dica: Verifique se o Firewall do Windows no Amaranth permite a porta 24800.", fg="yellow")
+        click.secho("💡 Dica: Verifique se o Firewall do Windows no Servidor permite a porta 24800.", fg="yellow")
 
 @cli.command("status")
 def cmd_status():
@@ -147,7 +144,6 @@ def cmd_status():
         click.secho(f"  ● Servidor: ATIVO (PID: {status['server_pids']})", fg="green", bold=True)
     else:
         click.echo("  ○ Servidor: Inativo")
-
     if status["client_running"]:
         click.secho(f"  ● Cliente:  ATIVO (PID: {status['client_pids']})", fg="green", bold=True)
     else:
@@ -159,14 +155,14 @@ def cmd_stop():
     """Encerra todos os processos do Input Leap (Server e Client)."""
     killed = leap_daemon.stop_all()
     if killed > 0:
+        _update_leap_state(active=False, mode="idle")
         click.secho(f"[OK] {killed} processo(s) do Input Leap finalizado(s).", fg="green")
     else:
         click.echo("[INFO] Nenhum processo ativo encontrado.")
 
 @cli.command("firewall")
 def cmd_firewall():
-    """Autoriza e cadastra as regras do LeapSys no Firewall do Windows (Requer Admin)."""
-    from sysutils.leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
+    """Cadastra regras de liberação de porta e executáveis no Firewall do Windows."""
     if not leap_elevation.is_admin():
         click.secho("[AVISO] Abra o terminal como Administrador para aplicar as regras no Firewall.", fg="yellow", bold=True)
     click.secho("[*] Cadastrando regras de liberação no Firewall do Windows...", fg="cyan")
@@ -178,7 +174,7 @@ def cmd_firewall():
 
 @cli.command("setup-ux")
 def cmd_setup_ux():
-    """⚡ Configura a UX Soberana: Atalho com Elevação Automática para o Leap/KVM."""
+    """Forja atalho soberano com permissão de Administrador."""
     click.secho("[*] Forjando Atalho Soberano na Área de Trabalho...", fg="cyan")
     ok, msg = leap_elevation.create_sovereign_shortcut()
     if ok:
@@ -188,4 +184,19 @@ def cmd_setup_ux():
     else:
         click.secho(f"❌ [FALHA] {msg}", fg="red", bold=True)
 
-
+def _update_leap_state(active: bool, mode: str = "idle", target: str = "", server_ip: str = "", port: int = 24800):
+    """Sincroniza o contrato soberano com o Doxly/Lite XL HUD em ~/.doxoade/leap_state.json."""
+    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or ".")
+    dox_dir = home / ".doxoade"
+    dox_dir.mkdir(parents=True, exist_ok=True)
+    state_file = dox_dir / "leap_state.json"
+    
+    data = {
+        "active": active,
+        "mode": mode,
+        "target": target,
+        "server_ip": server_ip,
+        "port": port,
+        "updated_at": time.time()
+    }
+    state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
