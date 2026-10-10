@@ -150,6 +150,9 @@ def get_sync_preview(
     """Gera um diagnóstico prévio exato do que será copiado e do que seria deletado."""
     log_dir.mkdir(parents=True, exist_ok=True)
     preview_log = log_dir / "preview_dryrun.log"
+    if preview_log.exists():
+        try: preview_log.unlink()
+        except: pass
 
     cmd = build_command(
         origem=origem,
