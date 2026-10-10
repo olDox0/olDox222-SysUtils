@@ -78,12 +78,12 @@ def preflight_check(origem: str, destino: str, dry_run: bool) -> tuple[bool, str
         destino_p = Path(destino)
         handshake_file = destino_p / ".dox_handshake.tmp"
         try:
-            destino_p.mkdir(parents=True, exist_ok=True)
-            handshake_file.write_text("ok", encoding="utf-8")
+            with open(handshake_file, "w", encoding="utf-8") as f:
+                f.write("ok")
             if handshake_file.exists():
                 handshake_file.unlink()
         except PermissionError:
-            return False, f"ACESSO NEGADO para escrita no destino '{destino}'. Verifique permissões NTFS."
+            return False, f"ACESSO NEGADO no destino '{destino}'. Rode o icacls no Bluebaby."
         except Exception as e:
             return False, f"Destino inacessível na rede '{destino}': {e}"
 
