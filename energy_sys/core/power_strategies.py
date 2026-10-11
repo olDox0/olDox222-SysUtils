@@ -73,12 +73,10 @@ def query_current_dc_value(sub: str, setting: str) -> Optional[int]:
         if res.returncode != 0:
             return None
         
-        # Busca especificamente a linha do valor DC atual (ignora índices possíveis)
         match = re.search(r"(?:DC.*?:\s*|Energia DC.*?:\s*)0x([0-9a-fA-F]+)", res.stdout, re.IGNORECASE)
         if match:
             return int(match.group(1), 16)
         
-        # Fallback: pega o último hexadecimal da saída (que corresponde ao valor DC atual)
         all_hex = re.findall(r"0x([0-9a-fA-F]+)", res.stdout)
         if all_hex:
             return int(all_hex[-1], 16)
@@ -134,7 +132,6 @@ def get_hybrid_cpu_topology(total_threads: int) -> Dict[int, str]:
         return {i: "Padrão" for i in range(total_threads)}
 
     try:
-        # Constante Win32 RelationProcessorCore = 0
         buf_len = ctypes.c_ulong(0)
         ctypes.windll.kernel32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(buf_len))
         if buf_len.value == 0:
@@ -144,23 +141,24 @@ def get_hybrid_cpu_topology(total_threads: int) -> Dict[int, str]:
         if not ctypes.windll.kernel32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(buf_len)):
             return {i: "Core" for i in range(total_threads)}
 
+        raw_bytes = buf.raw
         offset = 0
         has_efficiency_classes = False
         eff_map = {}
 
         while offset < buf_len.value:
-            rel = int.from_bytes(buf[offset:offset+4], 'little')
-            size = int.from_bytes(buf[offset+4:offset+8], 'little')
+            rel = int.from_bytes(raw_bytes[offset:offset+4], 'little')
+            size = int.from_bytes(raw_bytes[offset+4:offset+8], 'little')
             if size == 0:
                 break
             
             if rel == 0:  # RelationProcessorCore
-                eff_class = buf[offset+9]  # BYTE EfficiencyClass (0 = E-core, 1+ = P-core)
+                eff_class = raw_bytes[offset+9]  # Retorna inteiro nativo no Python 3
                 if eff_class > 0:
                     has_efficiency_classes = True
                 
-                # GroupMask affinity mask (offset 32 no x64)
-                mask = int.from_bytes(buf[offset+32:offset+40], 'little')
+                # GroupMask affinity mask (offset 32 em sistemas x64)
+                mask = int.from_bytes(raw_bytes[offset+32:offset+40], 'little')
                 for thread_idx in range(64):
                     if mask & (1 << thread_idx):
                         eff_map[thread_idx] = "P-Core (Performance)" if eff_class > 0 else "E-Core (Eficiência)"
@@ -172,7 +170,6 @@ def get_hybrid_cpu_topology(total_threads: int) -> Dict[int, str]:
     except Exception:
         pass
 
-    # Fallback para processadores simétricos tradicionais (como o Celeron N2808)
     return {i: "Núcleo Padrão" for i in range(total_threads)}
 
 def get_cpu_telemetry() -> Dict:
@@ -190,7 +187,8 @@ def get_cpu_telemetry() -> Dict:
     except Exception:
         pass
 
-    topology_map = get_hybrid_core_topology(total_threads)
+    # Chamada corrigida: get_hybrid_cpu_topology
+    topology_map = get_hybrid_cpu_topology(total_threads)
     is_hybrid = any("P-Core" in v for v in topology_map.values())
 
     return {
