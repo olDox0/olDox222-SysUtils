@@ -47,6 +47,17 @@ def cmd_status(tariff: float | None):
     click.echo(f"\n  Consumo Instantâneo  : {click.style(f'{watts:.2f} W', fg='yellow', bold=True)}")
     click.echo(f"  Método de Leitura    : {reading['method']}")
 
+    # Cálculo de Autonomia Dinâmica Real para Bateria
+    wmi_data = reading.get("details")
+    if p_status and p_status['has_battery'] and not p_status['ac_connected'] and watts > 0:
+        rem_mwh = (wmi_data or {}).get("remaining_mwh")
+        if rem_mwh:
+            hours_left = (rem_mwh / 1000.0) / watts
+            h = int(hours_left)
+            m = int((hours_left - h) * 60)
+            cor_autonomia = "green" if hours_left > 3.0 else "yellow" if hours_left > 1.5 else "red"
+            click.echo(f"  Autonomia Estimada   : {click.style(f'{h}h {m:02d}min', fg=cor_autonomia, bold=True)} (com a carga atual)")
+
     costs = cost_calculator.calculate_energy_cost(watts, tariff_kwh=tariff)
     click.secho(f"\n--- PROJEÇÃO DE CUSTO ({costs['provider'].upper()}: R$ {costs['tariff_kwh']:.4f}/kWh) ---", fg="green", bold=True)
     click.echo(f"  • Por Hora (Uso Contínuo)  : R$ {costs['cost_hour']:.4f}")
