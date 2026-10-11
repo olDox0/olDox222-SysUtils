@@ -235,26 +235,37 @@ def cmd_optimize(list_all: bool, enable_id: str | None, disable_id: str | None, 
 
 @cli.command("cpu")
 def cmd_cpu():
-    """Exibe o diagnóstico de clock, throttling e impacto do teto de frequência."""
-    click.secho("\n--- TELEMETRIA DA CPU & LIMITES ENERGÉTICOS ---", fg="cyan", bold=True)
+    """Exibe telemetria de clock, carga e separação de núcleos P-Core vs E-Core."""
+    click.secho("\n--- TELEMETRIA DA CPU & ARQUITETURA DE NÚCLEOS ---", fg="cyan", bold=True)
     cpu_info = power_strategies.get_cpu_telemetry()
     click.echo(f"  Modelo         : {click.style(cpu_info['cpu_name'], bold=True)}")
+    
+    tipo_arq = "Híbrida (Intel Performance + Efficiency)" if cpu_info['is_hybrid'] else "Simétrica Tradicional"
+    click.echo(f"  Arquitetura    : {click.style(tipo_arq, fg='green' if cpu_info['is_hybrid'] else 'white', bold=True)}")
     click.echo(f"  Topologia      : {cpu_info['cores_physical']} Núcleos Físicos | {cpu_info['cores_logical']} Threads")
+    
     curr_mhz = cpu_info['current_mhz']
     click.echo(f"  Clock Atual    : {click.style(f'{curr_mhz} MHz', fg='yellow', bold=True)}")
     if cpu_info['max_mhz'] > 0:
         click.echo(f"  Clock Máximo   : {cpu_info['max_mhz']} MHz")
 
-    # Verifica o teto ativo na bateria
+    # Lê o teto ativo na bateria corrigido (sem o bug do 0%)
     limit_val = power_strategies.query_current_dc_value("SUB_PROCESSOR", "PROCTHROTTLEMAX")
     limit_str = f"{limit_val}%" if limit_val is not None else "100% (Padrão)"
     color = "green" if (limit_val is not None and limit_val < 100) else "white"
     click.echo(f"  Teto na Bateria: {click.style(limit_str, fg=color, bold=True)}")
 
-    click.echo("\n  Carga por Núcleo:")
+    click.echo("\n  Distribuição de Carga por Núcleo:")
     for idx, load in enumerate(cpu_info['load_per_core']):
+        label = cpu_info['core_labels'].get(idx, "Core")
+        is_p = "P-Core" in label
+        is_e = "E-Core" in label
+        
+        tag_color = "cyan" if is_p else "magenta" if is_e else "white"
+        tag = click.style(f"[{label}]", fg=tag_color, bold=True) if (is_p or is_e) else ""
+        
         bar = "█" * int(load / 10) + "░" * (10 - int(load / 10))
-        click.echo(f"    Core {idx} : [{bar}] {load:>5.1f}%")
-    click.echo("-------------------------------------------------\n")
+        click.echo(f"    Thread {idx:>2} {tag:<28} : [{bar}] {load:>5.1f}%")
+    click.echo("--------------------------------------------------\n")
 
 
