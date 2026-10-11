@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 from pathlib import Path
 from energy_sys.platform.windows import win_power
-from energy_sys.core import power_estimator, process_impact, cost_calculator
+from energy_sys.core import power_estimator, process_impact, cost_calculator, power_strategies
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "data" / "energy_reports"
@@ -17,13 +17,13 @@ def cli():
 @click.option("--tariff", type=float, help="Define a tarifa padrão em R$/kWh.")
 @click.option("--provider", type=str, help="Apelido da fornecedora de energia.")
 def cmd_config(tariff: float | None, provider: str | None):
-    """Configura permanentemente a concessionária de energia e tarifa."""
+    """Configura a concessionária de energia e a tarifa padrão."""
     cfg = cost_calculator.load_energy_config()
     t = tariff if tariff is not None else cfg.get("tariff_kwh", 0.9543)
     p = provider if provider is not None else cfg.get("provider", "Elderbarry")
     
     cost_calculator.save_energy_config(tariff_kwh=t, provider=p)
-    click.secho(f"\n[OK] Configuração de energia salva com sucesso!", fg="green", bold=True)
+    click.secho(f"\n[OK] Configuração de energia salva!", fg="green", bold=True)
     click.echo(f"  Concessionária : {p}")
     click.echo(f"  Tarifa Fixada  : R$ {t:.4f} / kWh\n")
 
@@ -121,4 +121,140 @@ def cmd_report():
         os.startfile(str(report_file))
     else:
         click.secho("[FALHA] Relatório de bateria indisponível neste equipamento.", fg="yellow")
+
+@cli.command("optimize")
+@click.option("--list", "list_all", is_flag=True, help="Lista todas as estratégias, riscos e estado atual.")
+@click.option("--enable", "enable_id", type=str, default=None, help="ID da estratégia a ser ATIVADA (ex: cpu-limit).")
+@click.option("--disable", "disable_id", type=str, default=None, help="ID da estratégia a ser DESATIVADA.")
+@click.option("--rollback", is_flag=True, help="Restaura os valores da linha de base de fábrica.")
+@click.option("--apply", is_flag=True, help="Executa as alterações no Windows. Sem isto roda em Dry-Run.")
+def cmd_optimize(list_all: bool, enable_id: str | None, disable_id: str | None, rollback: bool, apply: bool):
+    """Gerenciador Tático de Eficiência Energética com Rollback Cirúrgico."""
+    baseline = power_strategies.ensure_baseline_snapshot()
+
+    if list_all or (not enable_id and not disable_id and not rollback):
+        click.secho("\n" + "=" * 75, fg="cyan")
+        click.secho(" 🛡️  CATÁLOGO DE ESTRATÉGIAS DE ENERGIA (SELEÇÃO CIRÚRGICA)", fg="cyan", bold=True)
+        click.secho("=" * 75, fg="cyan")
+        click.echo("  • Cada estratégia atua EXCLUSIVAMENTE quando o PC opera na BATERIA (DC).")
+        click.echo("  • Na tomada (AC), todas as restrições são desarmadas automaticamente a 100%.\n")
+
+        for s_id, s in power_strategies.STRATEGIES.items():
+            current_val = power_strategies.query_current_dc_value(s["sub"], s["setting"])
+            if current_val is None and "alt_sub" in s:
+                current_val = power_strategies.query_current_dc_value(s["alt_sub"], s["alt_setting"])
+                
+            is_active = (current_val == s["eco_value"]) if current_val is not None else False
+            status_text = click.style("[ATIVA]", fg="green", bold=True) if is_active else click.style("[DESATIVADA]", fg="yellow")
+            
+            risk_color = "red" if "ALTO" in s["risk"] else "yellow" if "MÉDIO" in s["risk"] else "green"
+            risk_label = click.style(s["risk"], fg=risk_color, bold=True)
+
+            click.echo(f"  ID: {click.style(s_id, fg='cyan', bold=True)}  {status_text}  (Risco: {risk_label})")
+            click.echo(f"  └─ Nome    : {s['name']}")
+            click.echo(f"  └─ Ganho   : {s['benefits']}")
+            click.echo(f"  └─ Alerta  : {s['risk_details']}")
+            click.echo("  " + "-" * 71)
+
+        click.echo("\n👉 Como ativar:    sysutils energy optimize --enable <ID> --apply")
+        click.echo("👉 Como desativar: sysutils energy optimize --disable <ID> --apply")
+        click.echo("👉 Como reverter:  sysutils energy optimize --rollback --apply\n")
+        return
+
+    # MODO ROLLBACK BASELINE
+    if rollback:
+        click.secho("\n[ROLLBACK] Restaurando parâmetros para a linha de base original...", fg="yellow", bold=True)
+        if not apply:
+            click.secho("  [DRY-RUN] Valores da baseline que seriam restaurados:", fg="cyan")
+            for s_id, base_val in baseline.items():
+                click.echo(f"    • {s_id} -> valor original de fábrica: {base_val}")
+            click.secho("\nExecute com --apply para efetivar.", fg="yellow")
+            return
+
+        for s_id, base_val in baseline.items():
+            s = power_strategies.STRATEGIES.get(s_id)
+            if s:
+                alt_sub = s.get("alt_sub")
+                alt_set = s.get("alt_setting")
+                power_strategies.apply_power_setting(s["sub"], s["setting"], base_val, alt_sub, alt_set)
+        click.secho("[SUCESSO] Sistema restaurado para os parâmetros de fábrica registrados no baseline!\n", fg="green", bold=True)
+        return
+
+    # MODO ENABLE
+    if enable_id:
+        if enable_id not in power_strategies.STRATEGIES:
+            click.secho(f"[ERRO] Estratégia '{enable_id}' não encontrada. Use --list para verificar os IDs.", fg="red")
+            return
+        
+        strat = power_strategies.STRATEGIES[enable_id]
+        click.secho(f"\n[*] Estratégia: {strat['name']}", fg="cyan", bold=True)
+        click.echo(f"    ID        : {enable_id}")
+        click.echo(f"    Benefício : {strat['benefits']}")
+        click.echo(f"    RISCO     : {strat['risk']} — {strat['risk_details']}")
+
+        if not apply:
+            click.secho("\n[DRY-RUN] Nenhuma alteração realizada. Para aplicar, execute:", fg="yellow")
+            click.echo(f"   sysutils energy optimize --enable {enable_id} --apply\n")
+            return
+
+        if "ALTO" in strat["risk"]:
+            if not click.confirm(click.style("\n⚠️  Esta estratégia altera a conduta térmica do hardware. Confirmar?", fg="red", bold=True), default=False):
+                click.secho("[ABORTADO] Operação cancelada.", fg="yellow")
+                return
+
+        ok = power_strategies.apply_power_setting(
+            strat["sub"], strat["setting"], strat["eco_value"],
+            strat.get("alt_sub"), strat.get("alt_setting")
+        )
+        if ok:
+            click.secho(f"\n✔ [SUCESSO] Estratégia '{enable_id}' ativada com sucesso!", fg="green", bold=True)
+        else:
+            click.secho(f"\n✘ [FALHA] Não suportado pelo hardware ou ACPI desta máquina.", fg="red")
+
+    # MODO DISABLE
+    if disable_id:
+        if disable_id not in power_strategies.STRATEGIES:
+            click.secho(f"[ERRO] Estratégia '{disable_id}' não encontrada.", fg="red")
+            return
+        strat = power_strategies.STRATEGIES[disable_id]
+        base_val = baseline.get(disable_id, strat["default_value"])
+
+        if not apply:
+            click.secho(f"\n[DRY-RUN] A estratégia '{disable_id}' seria restaurada para o valor original: {base_val}.", fg="yellow")
+            click.echo("Execute com --apply para efetivar.")
+            return
+
+        ok = power_strategies.apply_power_setting(
+            strat["sub"], strat["setting"], base_val,
+            strat.get("alt_sub"), strat.get("alt_setting")
+        )
+        if ok:
+            click.secho(f"\n✔ [SUCESSO] Estratégia '{disable_id}' desativada (restaurada para o padrão {base_val}).", fg="green")
+        else:
+            click.secho(f"\n✘ [FALHA] Falha ao restaurar configuração no powercfg.", fg="red")
+
+@cli.command("cpu")
+def cmd_cpu():
+    """Exibe o diagnóstico de clock, throttling e impacto do teto de frequência."""
+    click.secho("\n--- TELEMETRIA DA CPU & LIMITES ENERGÉTICOS ---", fg="cyan", bold=True)
+    cpu_info = power_strategies.get_cpu_telemetry()
+    click.echo(f"  Modelo         : {click.style(cpu_info['cpu_name'], bold=True)}")
+    click.echo(f"  Topologia      : {cpu_info['cores_physical']} Núcleos Físicos | {cpu_info['cores_logical']} Threads")
+    curr_mhz = cpu_info['current_mhz']
+    click.echo(f"  Clock Atual    : {click.style(f'{curr_mhz} MHz', fg='yellow', bold=True)}")
+    if cpu_info['max_mhz'] > 0:
+        click.echo(f"  Clock Máximo   : {cpu_info['max_mhz']} MHz")
+
+    # Verifica o teto ativo na bateria
+    limit_val = power_strategies.query_current_dc_value("SUB_PROCESSOR", "PROCTHROTTLEMAX")
+    limit_str = f"{limit_val}%" if limit_val is not None else "100% (Padrão)"
+    color = "green" if (limit_val is not None and limit_val < 100) else "white"
+    click.echo(f"  Teto na Bateria: {click.style(limit_str, fg=color, bold=True)}")
+
+    click.echo("\n  Carga por Núcleo:")
+    for idx, load in enumerate(cpu_info['load_per_core']):
+        bar = "█" * int(load / 10) + "░" * (10 - int(load / 10))
+        click.echo(f"    Core {idx} : [{bar}] {load:>5.1f}%")
+    click.echo("-------------------------------------------------\n")
+
 
