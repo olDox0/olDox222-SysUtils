@@ -84,6 +84,7 @@ class SysUtilsLazyGroup(click.Group):
             'verify':'doxbackup.core.verify:cli',
             'sync':  'syncdiag.cli.commands:cli',
             'leap':  'leap_sys.cli.cmd_leap:cli',  # <-- Ajustado de 'sysutils.leap_sys...' para 'leap_sys...'
+            'energy': 'energy_sys.cli.cmd_energy:cli',
         }
         # ═══ COMANDOS DOXOADE PORTADOS (PRIORIDADE SECUNDÁRIA) ═══
         self._ported_map = self._load_ported_commands()
