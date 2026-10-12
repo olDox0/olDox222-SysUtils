@@ -33,34 +33,23 @@ def _find_litexl_exe() -> str | None:
     return None
 
 def create_sovereign_shortcut() -> tuple[bool, str]:
-    """
-    ⚔️ ARES + HEFESTO: Forja um atalho .lnk na Área de Trabalho com a flag RunAsAdministrator.
-    Injeta o bit SLDF_RUNAS_USER (0x20 no offset 0x15) diretamente no binário do atalho.
-    """
     exe_path = _find_litexl_exe()
-    if not exe_path:
-        return False, "lite-xl.exe não encontrado no sistema."
-
+    if not exe_path: return False, "lite-xl.exe não encontrado no sistema."
     desktop = Path(os.path.join(os.environ['USERPROFILE'], 'Desktop'))
-    shortcut_path = desktop / "Doxly (Admin).lnk"
-    
-    # Script PowerShell microscópico para criar o atalho e injetar a flag de Admin
+    shortcut_path = desktop / "Doxly Cânone.lnk"
     ps_script = f"""
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut('{str(shortcut_path)}')
 $Shortcut.TargetPath = '{exe_path}'
 $Shortcut.WorkingDirectory = '{os.path.expanduser("~")}'
 $Shortcut.IconLocation = '{exe_path},0'
-$Shortcut.Description = 'Doxly IDE (Elevated for KVM/Leap)'
+$Shortcut.Description = 'Doxly IDE Cânone (Soberano)'
 $Shortcut.Save()
-
-# Injeção Binária da Flag RunAsAdministrator (Ares Hack)
 $bytes = [System.IO.File]::ReadAllBytes('{str(shortcut_path)}')
 $bytes[0x15] = $bytes[0x15] -bor 0x20 
 [System.IO.File]::WriteAllBytes('{str(shortcut_path)}', $bytes)
 """
     try:
-        # Execução 100% silenciosa (Zero-Flash, Zero-Window)
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", ps_script],
             check=True,
@@ -68,9 +57,8 @@ $bytes[0x15] = $bytes[0x15] -bor 0x20
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
-        return True, f"Atalho soberano forjado em: {shortcut_path}"
-    except Exception as e:
-        return False, f"Falha ao forjar atalho: {e}"
+        return True, f"Atalho Doxly Cânone forjado em: {shortcut_path}"
+    except Exception as e: return False, f"Falha ao forjar atalho: {e}"
 
 def ensure_litexl_admin_elevation() -> tuple[bool, str]:
     """
