@@ -83,7 +83,8 @@ class SysUtilsLazyGroup(click.Group):
             'net':   'netdiag.cli.commands:cli',
             'verify':'doxbackup.core.verify:cli',
             'sync':  'syncdiag.cli.commands:cli',
-            'leap':  'leap_sys.cli.cmd_leap:cli',  # <-- Ajustado de 'sysutils.leap_sys...' para 'leap_sys...'
+            'share': 'syncdiag.cli.commands:share_group',  # <-- Adicione aqui
+            'leap':  'leap_sys.cli.cmd_leap:cli',
             'energy': 'energy_sys.cli.cmd_energy:cli',
             'android': 'android_sys.cli.cmd_android:cli',
         }

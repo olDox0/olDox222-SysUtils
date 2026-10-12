@@ -1,20 +1,18 @@
 # syncdiag/core/network_connect.py
 """
-Módulo de Gerenciamento e Conexão de Rede Remota (SMB sobre Tailscale/LAN).
-Responsável por testes de porta 445, injeção de credenciais (cmdkey),
-mapeamento de drives (net use) e abertura no Windows Explorer.
+Módulo de Conexão de Rede SMB sobre Tailscale/LAN.
+Gerencia testes de porta 445, credenciais cmdkey, mapeamento net use e Explorer.
 """
 from __future__ import annotations
 
 import os
-import re
 import socket
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
 
 def probe_smb_port(host: str, port: int = 445, timeout: float = 2.0) -> bool:
-    """Verifica se o host remoto está ouvindo na porta SMB sem congelar a sessão."""
+    """Verifica se o host remoto responde na porta 445 sem congelar o sistema."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
@@ -23,10 +21,7 @@ def probe_smb_port(host: str, port: int = 445, timeout: float = 2.0) -> bool:
 
 
 def get_tailscale_peers() -> List[Dict[str, str]]:
-    """
-    Recupera máquinas da rede Tailscale via comando nativo CLI.
-    Retorna lista com hostname, ip e status online.
-    """
+    """Consulta máquinas ativas via CLI do Tailscale."""
     try:
         proc = subprocess.run(
             ["tailscale", "status"],
@@ -44,7 +39,7 @@ def get_tailscale_peers() -> List[Dict[str, str]]:
     peers = []
     for line in proc.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 4:
+        if len(parts) >= 2:
             ip, name = parts[0], parts[1]
             status = "offline" if "offline" in line else "active"
             peers.append({"ip": ip, "name": name, "status": status})
@@ -52,10 +47,7 @@ def get_tailscale_peers() -> List[Dict[str, str]]:
 
 
 def register_credentials(target: str, user: str, password: Optional[str] = None) -> bool:
-    """
-    Persiste credenciais no Windows Credential Manager via cmdkey.
-    Elimina caixas de diálogo pop-up repetitivas ao acessar UNC.
-    """
+    """Registra credenciais no Windows Credential Manager via cmdkey."""
     cmd = ["cmdkey", f"/add:{target}", f"/user:{user}"]
     if password:
         cmd.append(f"/pass:{password}")
@@ -71,10 +63,7 @@ def mount_network_drive(
     password: Optional[str] = None,
     persistent: bool = True,
 ) -> Tuple[bool, str]:
-    """
-    Mapeia uma pasta compartilhada para uma letra de unidade (ex: Z:)
-    ou conecta uma sessão autenticada persistente.
-    """
+    """Mapeia pasta compartilhada via net use (com letra de unidade ou link UNC)."""
     target = drive_letter if drive_letter else unc_path
     cmd = ["net", "use", target, unc_path]
 
@@ -97,13 +86,13 @@ def mount_network_drive(
 
     if proc.returncode == 0:
         return True, f"Compartilhamento '{unc_path}' conectado com sucesso!"
-    
+
     err_msg = proc.stderr.strip() or proc.stdout.strip()
     return False, f"Falha ao conectar via 'net use': {err_msg}"
 
 
 def unmount_network_drive(target: str) -> Tuple[bool, str]:
-    """Desconecta uma unidade mapeada ou sessão UNC."""
+    """Desconecta a unidade de rede ou link montado."""
     cmd = ["net", "use", target, "/DELETE", "/YES"]
     proc = subprocess.run(
         cmd,
@@ -114,10 +103,10 @@ def unmount_network_drive(target: str) -> Tuple[bool, str]:
         shell=True,
     )
     if proc.returncode == 0:
-        return True, f"Alvo '{target}' desconectado com sucesso."
+        return True, f"Unidade/Caminho '{target}' desconectado com sucesso."
     return False, proc.stderr.strip() or proc.stdout.strip()
 
 
 def open_in_explorer(target_path: str) -> None:
-    """Abre a pasta local ou mapeada no Windows Explorer nativo."""
+    """Abre o caminho montado no Windows Explorer nativo."""
     os.system(f'explorer.exe "{target_path}"')
