@@ -204,6 +204,19 @@ def share_peers():
     click.echo("-----------------------------------------\n")
 
 
+@share_group.command("pair")
+@click.argument("host")
+@click.option("--user", prompt="Usuário do Windows remoto", help="Nome do usuário do PC remoto.")
+@click.option("--password", prompt=True, hide_input=True, help="Senha do usuário remoto.")
+def share_pair(host, user, password):
+    """Pareia e salva as credenciais de um PC (executar apenas 1 vez)."""
+    network_connect.save_host_credentials(host, user, password)
+    network_connect.register_credentials(host, user, password)
+    click.secho(f"\n[OK] Pareamento com '{host}' configurado com sucesso!", fg="green", bold=True)
+    click.echo(f"Agora você pode conectar sem digitar senhas:")
+    click.secho(f"👉 sysutils share connect {host} NOME_DA_PASTA\n", fg="cyan")
+
+
 @share_group.command("connect")
 @click.argument("host")
 @click.argument("share_name")
@@ -218,16 +231,27 @@ def share_connect(host, share_name, drive, user, password, open_dir):
 
     if not network_connect.probe_smb_port(host, timeout=2.0):
         click.secho(f"[ERRO] A porta SMB (445) em '{host}' não respondeu.", fg="red", bold=True)
-        click.echo("💡 Diagnóstico rápido:")
-        click.echo("   1. Verifique se o Tailscale está rodando em ambas as pontas.")
-        click.echo("   2. No host remoto, libere a porta 445 no Firewall:")
-        click.secho('      New-NetFirewallRule -DisplayName "SMB Tailscale" -Direction Inbound -LocalPort 445 -Protocol TCP -Action Allow', fg="yellow")
         raise SystemExit(1)
 
     click.secho("    ✔ Porta 445 ativa e respondendo!", fg="green")
 
+    # 1. Recupera credenciais salvas se não foram passadas na linha de comando
+    if not user:
+        saved_user, saved_pass = network_connect.get_saved_credentials(host)
+        if saved_user:
+            user = saved_user
+            password = saved_pass
+            click.echo(f"[*] Usando credenciais salvas para '{user}'...")
+        else:
+            # Fallback interativo para evitar erro 1223 silencioso
+            click.secho(f"\n[!] Nenhuma credencial encontrada para '{host}'.", fg="yellow")
+            if click.confirm("Deseja inserir o usuário e senha agora?", default=True):
+                user = click.prompt("Usuário do Windows remoto")
+                password = click.prompt("Senha", hide_input=True)
+                if click.confirm("Deseja salvar estas credenciais para os próximos acessos?", default=True):
+                    network_connect.save_host_credentials(host, user, password)
+
     if user:
-        click.echo(f"[*] Salvando credenciais de rede para '{host}'...")
         network_connect.register_credentials(host, user, password)
 
     click.echo(f"[*] Mapeando '{unc_path}' como '{drive}'...")
@@ -245,8 +269,7 @@ def share_connect(host, share_name, drive, user, password, open_dir):
         if open_dir:
             network_connect.open_in_explorer(drive)
     else:
-        click.secho(f"[AVISO] Mapeamento de letra falhou: {msg}", fg="yellow")
-        click.echo("[*] Tentando abrir diretamente via UNC no Explorer...")
+        click.secho(f"[AVISO] Mapeamento falhou: {msg}", fg="yellow")
         if open_dir:
             network_connect.open_in_explorer(unc_path)
 

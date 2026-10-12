@@ -6,12 +6,40 @@ Gerencia testes de porta 445, credenciais cmdkey, mapeamento net use e Explorer.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import socket
 import subprocess
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
+CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "network_credentials.json"
+
+def save_host_credentials(host: str, user: str, password: str) -> None:
+    """Salva credenciais em cofre local para conexão automática."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    data[host] = {"user": user, "password": password}
+    CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def get_saved_credentials(host: str) -> Tuple[Optional[str], Optional[str]]:
+    """Recupera credenciais salvas para um host."""
+    if not CONFIG_FILE.exists():
+        return None, None
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        cred = data.get(host)
+        if cred:
+            return cred.get("user"), cred.get("password")
+    except Exception:
+        pass
+    return None, None
 
 def _find_tailscale_bin() -> Optional[str]:
     """Localiza o binário do Tailscale mesmo que não esteja no PATH do Windows."""
