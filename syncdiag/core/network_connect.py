@@ -15,6 +15,48 @@ from pathlib import Path
 
 CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "network_credentials.json"
 
+# No syncdiag/core/network_connect.py:
+
+def mount_network_drive(
+    unc_path: str,
+    drive_letter: Optional[str] = None,
+    user: Optional[str] = None,
+    password: Optional[str] = None,
+    persistent: bool = True,
+    host: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Mapeia pasta compartilhada garantindo prefixo do host no usuário."""
+    target = drive_letter if drive_letter else unc_path
+    cmd = ["net", "use", target, unc_path]
+
+    # Previne Erro 86: injeta o Host no usuário se não houver domínio explícito
+    formatted_user = user
+    if formatted_user and host and ("\\" not in formatted_user):
+        formatted_user = f"{host}\\{formatted_user}"
+
+    if password is not None:
+        cmd.append(f'"{password}"' if password == "" else password)
+
+    if formatted_user:
+        cmd.append(f"/USER:{formatted_user}")
+
+    cmd.append(f"/PERSISTENT:{'YES' if persistent else 'NO'}")
+
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=True,
+    )
+
+    if proc.returncode == 0:
+        return True, f"Compartilhamento '{unc_path}' conectado com sucesso!"
+
+    err_msg = proc.stderr.strip() or proc.stdout.strip()
+    return False, f"Falha ao conectar via 'net use': {err_msg}"
+
 def save_host_credentials(host: str, user: str, password: str) -> None:
     """Salva credenciais em cofre local para conexão automática."""
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)

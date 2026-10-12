@@ -261,6 +261,7 @@ def share_connect(host, share_name, drive, user, password, open_dir):
         user=user,
         password=password,
         persistent=True,
+        host=host, # <-- Garante a resolução correta do domínio
     )
 
     if success:
