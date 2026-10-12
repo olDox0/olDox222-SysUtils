@@ -3,8 +3,7 @@ import os
 import socket
 from pathlib import Path
 import click
-from syncdiag.core import profiles as profile_store, robocopy_engine as engine, smb_share
-
+from syncdiag.core import profiles as profile_store, robocopy_engine as engine, smb_share, network_connect
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = PROJECT_ROOT / "data" / "sync_logs"
 
@@ -191,3 +190,74 @@ def share_list():
     for s in shares:
         click.echo(f"  • {s['name']:<20} -> {s['path']}")
     click.echo("--------------------------------\n")
+
+@share_group.command("peers", help="Lista máquinas detectadas na rede Tailscale.")
+def share_peers():
+    peers = network_connect.get_tailscale_peers()
+    if not peers:
+        click.secho("[!] Nenhuma máquina Tailscale localizada ou Tailscale CLI indisponível.", fg="yellow")
+        return
+    click.echo("\n--- MÁQUINAS NA REDE TAILSCALE ---")
+    for p in peers:
+        color = "green" if p["status"] == "active" else "red"
+        click.echo(f"  • {p['name']:<18} ({click.style(p['ip'], fg='cyan')}) - {click.style(p['status'], fg=color)}")
+    click.echo("----------------------------------\n")
+
+@share_group.command("connect", help="Conecta e mapeia pasta compartilhada (Bluebaby/Amaranth).")
+@click.argument("host")
+@click.argument("share_name")
+@click.option("--drive", "-d", default="Z:", show_default=True, help="Letra da unidade para montagem.")
+@click.option("--user", "-u", default=None, help="Usuário do Windows remoto.")
+@click.option("--password", "-p", default=None, help="Senha do usuário remoto.")
+@click.option("--open-dir/--no-open", default=True, help="Abre no Windows Explorer após conectar.")
+def share_connect(host, share_name, drive, user, password, open_dir):
+    unc_path = f"\\\\{host}\\{share_name}"
+    click.secho(f"\n[*] Testando conectividade SMB com '{host}' (Porta 445)...", fg="cyan")
+
+    # 1. Pré-teste de socket (evita congelamento do Windows)
+    if not network_connect.probe_smb_port(host, timeout=2.0):
+        click.secho(f"[ERRO] A porta SMB (445) em '{host}' não respondeu.", fg="red", bold=True)
+        click.echo("💡 Causas comuns:")
+        click.echo("   1. O Tailscale não está ativo ou o IP mudou.")
+        click.echo("   2. O Windows Firewall do host bloqueou o compartilhamento na rede pública.")
+        click.echo("   3. O serviço 'Server' (LanmanServer) está desativado no destino.")
+        raise SystemExit(1)
+
+    click.secho("    ✔ Conexão física/porta 445 OK!", fg="green")
+
+    # 2. Injeção de credencial se informada
+    if user:
+        click.echo(f"[*] Registrando credenciais para '{host}'...")
+        network_connect.register_credentials(host, user, password)
+
+    # 3. Mapeamento
+    click.echo(f"[*] Mapeando '{unc_path}' para '{drive}'...")
+    success, msg = network_connect.mount_network_drive(
+        unc_path=unc_path,
+        drive_letter=drive,
+        user=user,
+        password=password,
+        persistent=True,
+    )
+
+    if success:
+        click.secho(f"[OK] {msg}", fg="green", bold=True)
+        click.secho(f"👉 Pronto para copiar e colar diretamente via {drive}!", fg="yellow")
+        if open_dir:
+            network_connect.open_in_explorer(drive)
+    else:
+        click.secho(f"[AVISO] Montagem de letra falhou: {msg}", fg="yellow")
+        click.echo("[*] Tentando acesso direto via UNC no Explorer...")
+        if open_dir:
+            network_connect.open_in_explorer(unc_path)
+
+
+@share_group.command("disconnect", help="Desconecta unidade de rede montada.")
+@click.argument("target", default="Z:")
+def share_disconnect(target):
+    success, msg = network_connect.unmount_network_drive(target)
+    if success:
+        click.secho(f"[OK] {msg}", fg="green")
+    else:
+        click.secho(f"[ERRO] {msg}", fg="red")
+
