@@ -6,9 +6,32 @@ Gerencia testes de porta 445, credenciais cmdkey, mapeamento net use e Explorer.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+
+
+def _find_tailscale_bin() -> Optional[str]:
+    """Localiza o binário do Tailscale mesmo que não esteja no PATH do Windows."""
+    # 1. Tenta no PATH do sistema
+    in_path = shutil.which("tailscale")
+    if in_path:
+        return in_path
+
+    # 2. Caminhos conhecidos de instalação no Windows
+    possible_paths = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tailscale" / "tailscale.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Tailscale" / "tailscale.exe",
+        Path(os.environ.get("LocalAppData", "")) / "Tailscale" / "tailscale.exe",
+    ]
+
+    for p in possible_paths:
+        if p.exists():
+            return str(p)
+
+    return None
 
 
 def probe_smb_port(host: str, port: int = 445, timeout: float = 2.0) -> bool:
@@ -21,10 +44,14 @@ def probe_smb_port(host: str, port: int = 445, timeout: float = 2.0) -> bool:
 
 
 def get_tailscale_peers() -> List[Dict[str, str]]:
-    """Consulta máquinas ativas via CLI do Tailscale."""
+    """Consulta máquinas ativas via CLI do Tailscale com auto-detecção de path."""
+    bin_path = _find_tailscale_bin()
+    if not bin_path:
+        return []
+
     try:
         proc = subprocess.run(
-            ["tailscale", "status"],
+            [bin_path, "status"],
             capture_output=True,
             text=True,
             encoding="utf-8",
