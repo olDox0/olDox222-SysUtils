@@ -3,7 +3,7 @@ import os
 import socket
 from pathlib import Path
 import click
-from syncdiag.core import profiles as profile_store, robocopy_engine as engine, smb_share, network_connect
+from syncdiag.core import profiles as profile_store, robocopy_engine as engine, smb_share, network_connect, network_connect
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = PROJECT_ROOT / "data" / "sync_logs"
 
@@ -260,4 +260,16 @@ def share_disconnect(target):
         click.secho(f"[OK] {msg}", fg="green")
     else:
         click.secho(f"[ERRO] {msg}", fg="red")
+
+@share_group.command("peers", help="Lista máquinas detectadas na rede Tailscale.")
+def share_peers():
+    peers = network_connect.get_tailscale_peers()
+    if not peers:
+        click.secho("[!] Nenhuma máquina Tailscale localizada ou Tailscale CLI indisponível.", fg="yellow")
+        return
+    click.echo("\n--- MÁQUINAS NA REDE TAILSCALE ---")
+    for p in peers:
+        color = "green" if p["status"] == "active" else "red"
+        click.echo(f"  • {p['name']:<18} ({click.style(p['ip'], fg='cyan')}) - {click.style(p['status'], fg=color)}")
+    click.echo("----------------------------------\n")
 
