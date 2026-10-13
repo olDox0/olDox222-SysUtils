@@ -4,6 +4,7 @@ Interface CLI para Perfis de Sincronização e Compartilhamento de Rede SMB.
 """
 import os
 import socket
+import subprocess
 from pathlib import Path
 import click
 
