@@ -284,3 +284,99 @@ def share_disconnect(target):
         click.secho(f"[OK] {msg}", fg="green")
     else:
         click.secho(f"[ERRO] {msg}", fg="red")
+
+@share_group.command("auto")
+def share_auto():
+    """🧙 Assistente Inteligente: Configura pastas, permissões e conecta ao outro PC."""
+    click.secho("\n" + "=" * 65, fg="cyan")
+    click.secho(" 🚀 SYSUTILS SHARE AUTO — ASSISTENTE DE CONEXÃO DIRETA", fg="cyan", bold=True)
+    click.secho("=" * 65 + "\n", fg="cyan")
+
+    # 1. Ativa correção de UAC (evita pop-up de 'Z:\ não disponível')
+    network_connect.fix_uac_linked_connections()
+
+    # 2. Identifica estação atual
+    station_key, profile = network_connect.identify_current_station()
+    hostname = socket.gethostname()
+    click.echo(f"  • Estação Local : {click.style(hostname, bold=True, fg='green')} ({station_key.upper()})")
+    click.echo(f"  • Alvo Remoto   : {click.style(profile['peer_name'].upper(), bold=True, fg='yellow')}")
+
+    # 3. Garante que a pasta local pré-estabelecida existe
+    local_dir = Path(profile["local_folder_path"])
+    local_dir.mkdir(parents=True, exist_ok=True)
+    click.echo(f"  • Pasta Local   : {local_dir}")
+
+    # 4. Garante permissão física NTFS de escrita total
+    subprocess.run(
+        ["icacls", str(local_dir), "/grant", "Todos:(OI)(CI)F", "/T", "/C", "/Q"],
+        capture_output=True,
+        text=True,
+    )
+
+    # 5. Garante que a pasta local está compartilhada na rede
+    share_name = profile["local_share_name"]
+    smb_share.create_share(share_name, str(local_dir))
+    click.secho(f"  ✔ Compartilhamento local ativo: \\\\{hostname}\\{share_name}", fg="green")
+
+    # 6. Localiza o outro computador via Tailscale
+    click.echo(f"\n[*] Procurando {profile['peer_name'].upper()} na rede Tailscale...")
+    peers = network_connect.get_tailscale_peers()
+    remote_ip = None
+
+    for p in peers:
+        p_name = p["name"].lower()
+        if any(hint in p_name for hint in profile["peer_hostname_hints"]):
+            remote_ip = p["ip"]
+            break
+
+    if not remote_ip:
+        click.secho(f"[!] Não foi possível detectar o IP de {profile['peer_name']} automaticamente.", fg="yellow")
+        remote_ip = click.prompt("Digite o IP Tailscale da outra máquina (ex: 100.x.y.z)")
+    else:
+        click.secho(f"  ✔ {profile['peer_name'].upper()} localizado: {remote_ip}", fg="green", bold=True)
+
+    # 7. Teste de porta 445
+    if not network_connect.probe_smb_port(remote_ip, timeout=2.0):
+        click.secho(f"\n[ERRO] A porta SMB em {remote_ip} não respondeu.", fg="red", bold=True)
+        click.echo("Certifique-se de que o Tailscale está ligado na outra máquina.")
+        raise SystemExit(1)
+
+    # 8. Recuperação/Solicitação de Credenciais
+    saved_user, saved_pass = network_connect.get_saved_credentials(remote_ip)
+    user = saved_user
+    password = saved_pass
+
+    if not user:
+        click.secho(f"\n[!] Configure o acesso ao computador {profile['peer_name'].upper()}:", fg="yellow")
+        user = click.prompt("Nome do usuário do Windows no outro PC")
+        password = click.prompt("Senha (aperte ENTER se não tiver senha)", default="", hide_input=True)
+        network_connect.save_host_credentials(remote_ip, user, password)
+
+    # 9. Escolhe a melhor letra de unidade livre (evita Erro 85)
+    drive_letter = network_connect.get_available_drive_letter()
+    remote_share = profile["remote_share_name"]
+    unc_path = f"\\\\{remote_ip}\\{remote_share}"
+
+    click.echo(f"\n[*] Conectando à pasta remota '{unc_path}' na unidade {drive_letter}...")
+    success, msg = network_connect.mount_network_drive(
+        unc_path=unc_path,
+        drive_letter=drive_letter,
+        user=user,
+        password=password,
+        persistent=True,
+        host=remote_ip,
+    )
+
+    if success:
+        click.secho(f"\n[SUCESSO] Conectado à outra máquina com sucesso!", fg="green", bold=True)
+        click.secho(f"👉 Abrindo unidade '{drive_letter}' e pasta de rede no Windows Explorer...", fg="cyan")
+        network_connect.open_in_explorer(drive_letter)
+        # Abre também o UNC direto caso o UAC demore a atualizar
+        network_connect.open_in_explorer(unc_path)
+    else:
+        click.secho(f"\n[AVISO] {msg}", fg="yellow")
+        click.echo("[*] Abrindo acesso direto via UNC no Windows Explorer...")
+        network_connect.open_in_explorer(unc_path)
+
+    click.secho("\n" + "=" * 65 + "\n", fg="cyan")
+

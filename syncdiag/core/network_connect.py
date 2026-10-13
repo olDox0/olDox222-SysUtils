@@ -8,13 +8,75 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import string
 import socket
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 CONFIG_FILE = Path(__file__).resolve().parents[2] / "data" / "network_credentials.json"
+PRESET_PROFILES = {
+    "amaranth": {
+        "peer_name": "bluebaby",
+        "peer_hostname_hints": ["desktop-5np5bhe", "bluebaby"],
+        "local_share_name": "Apricot",
+        "local_folder_path": r"C:\SysUtils_Shared",
+        "remote_share_name": "Bluebaby_Share",
+    },
+    "bluebaby": {
+        "peer_name": "amaranth",
+        "peer_hostname_hints": ["amaranth"],
+        "local_share_name": "Bluebaby_Share",
+        "local_folder_path": r"C:\SysUtils_Shared",
+        "remote_share_name": "Apricot",
+    },
+}
 
+def get_available_drive_letter() -> str:
+    """Busca a próxima letra de unidade livre no Windows (começando de Z até D)."""
+    used_letters = set()
+    proc = subprocess.run(["net", "use"], capture_output=True, text=True, errors="replace")
+    for line in proc.stdout.splitlines():
+        for token in line.split():
+            if len(token) == 2 and token[1] == ":" and token[0].isalpha():
+                used_letters.add(token.upper())
+
+    # Também checa letras de discos físicos
+    for drive in string.ascii_uppercase:
+        if os.path.exists(f"{drive}:"):
+            used_letters.add(f"{drive}:")
+
+    # Varre de Z para baixo procurando uma letra livre
+    for letter in reversed(string.ascii_uppercase):
+        candidate = f"{letter}:"
+        if candidate not in used_letters and candidate not in ["A:", "B:", "C:"]:
+            return candidate
+
+    return "Z:"
+
+
+def fix_uac_linked_connections() -> None:
+    """
+    Ativa EnableLinkedConnections no Registro do Windows.
+    Garante que unidades mapeadas no terminal Administrador apareçam
+    imediatamente no Windows Explorer sem o erro 'Z:\ não está disponível'.
+    """
+    cmd = (
+        'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" '
+        '/v EnableLinkedConnections /t REG_DWORD /d 1 /f'
+    )
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, shell=True)
+    except Exception:
+        pass
+
+
+def identify_current_station() -> Tuple[str, Dict]:
+    """Identifica se o computador atual é Amaranth ou Bluebaby."""
+    hostname = socket.gethostname().lower()
+    if "amaranth" in hostname:
+        return "amaranth", PRESET_PROFILES["amaranth"]
+    return "bluebaby", PRESET_PROFILES["bluebaby"]
 
 def _find_tailscale_bin() -> Optional[str]:
     """Localiza o binário do Tailscale mesmo fora do PATH."""
