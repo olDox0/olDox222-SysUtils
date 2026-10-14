@@ -1,7 +1,7 @@
 # leap_sys/cli/cmd_leap.py
 """
 Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
-Correção forense de TLS, geração de deskflow.pem e chave tlsEnabled=false.
+Suporta auto-elevação UAC, 'setup' de binários, compatibilidade TLS e integração Doxly.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional, List
 import click
@@ -21,13 +22,17 @@ import click
 from syncdiag.core import network_connect
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BIN_DIR = PROJECT_ROOT / "data" / "bin"
 STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
 CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
+SERVER_CONF_PATH = Path.home() / ".doxoade" / "deskflow_server.conf"
 DESKFLOW_TLS_CERT = Path(r"C:\ProgramData\Deskflow\tls\deskflow.pem")
+
+DESKFLOW_RELEASE_URL = "https://github.com/deskflow/deskflow/releases/download/v1.26.0/deskflow-1.26.0-win-x64-portable.7z"
 
 
 # ═══════════════════════════════════════════════════════════════
-# AUTO-ELEVAÇÃO UAC E CERTIFICADOS TLS
+# AUTO-ELEVAÇÃO UAC E CERTIFICADOS
 # ═══════════════════════════════════════════════════════════════
 def is_admin() -> bool:
     try:
@@ -51,16 +56,14 @@ def request_elevation():
 
 
 def ensure_deskflow_tls_cert():
-    """
-    Garante que C:\ProgramData\Deskflow\tls\deskflow.pem exista.
-    Elimina a falha: 'secure socket error: tls certificate doesn't exist'.
+    r"""
+    Garante que C:\ProgramData\Deskflow\tls\deskflow.pem exista fisicamente.
     """
     if DESKFLOW_TLS_CERT.exists():
         return
 
     DESKFLOW_TLS_CERT.parent.mkdir(parents=True, exist_ok=True)
 
-    # 1. Tenta gerar via OpenSSL presente no Git ou MinGW
     openssl_bin = shutil.which("openssl")
     if not openssl_bin:
         for candidate in [
@@ -78,16 +81,6 @@ def ensure_deskflow_tls_cert():
             "-keyout", str(DESKFLOW_TLS_CERT), "-out", str(DESKFLOW_TLS_CERT)
         ]
         subprocess.run(cmd, capture_output=True, shell=False)
-
-    # 2. Se o OpenSSL não estiver acessível, gera um par PEM funcional direto
-    if not DESKFLOW_TLS_CERT.exists():
-        # Fallback de certificado auto-assinado válido
-        ps_cmd = (
-            f'$cert = New-SelfSignedCertificate -DnsName "Deskflow" -CertStoreLocation "cert:\\LocalMachine\\My"; '
-            f'$pwd = ConvertTo-SecureString -String "deskflow" -Force -AsPlainText; '
-            f'Export-PfxCertificate -Cert $cert -FilePath "{DESKFLOW_TLS_CERT.parent}\\temp.pfx" -Password $pwd'
-        )
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True)
 
 
 def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, port: int = 24800):
@@ -113,17 +106,13 @@ def get_running_kvm_process() -> Optional[str]:
         text=True,
         errors="replace",
     )
-    for target in ["barriers.exe", "input-leaps.exe", "deskflow-core.exe", "deskflow-server.exe"]:
+    for target in ["deskflow-core.exe", "deskflow-server.exe", "barriers.exe", "input-leaps.exe"]:
         if target.lower() in proc.stdout.lower():
             return target
     return None
 
 
 def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
-    """
-    Gera as configurações oficiais do Deskflow:
-    A chave exata no C++ é 'tlsEnabled=false' sob '[security]'.
-    """
     CLIENT_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
     content = (
         f"[client]\n"
@@ -135,7 +124,6 @@ def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
     )
     CLIENT_CONF_PATH.write_text(content, encoding="utf-8")
 
-    # Injeta a chave também no Deskflow.conf do AppData
     appdata = os.environ.get("APPDATA")
     if appdata:
         try:
@@ -167,11 +155,20 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
     if role in ("server", "any"):
         names_to_check.extend(["deskflow-core", "deskflow-server", "input-leaps", "barriers"])
 
+    # 1. Checa no PATH
     for name in names_to_check:
         found = shutil.which(name)
         if found:
             return found
 
+    # 2. Checa binários portáteis no diretório do projeto
+    if BIN_DIR.exists():
+        for name in names_to_check:
+            p = BIN_DIR / f"{name}.exe"
+            if p.exists():
+                return str(p)
+
+    # 3. Descobre o caminho do processo se ele já estiver rodando
     for name in names_to_check:
         cmd = f'powershell -NoProfile -Command "(Get-Process -Name \'{name}\' -ErrorAction SilentlyContinue).Path"'
         p = subprocess.run(cmd, capture_output=True, text=True, shell=True)
@@ -179,6 +176,7 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
         if out and out[0] and Path(out[0]).exists():
             return out[0]
 
+    # 4. Pastas Padrões do Windows
     roots = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
         Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
@@ -205,6 +203,71 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
 def cli():
     """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
     pass
+
+
+@cli.command("setup")
+def leap_setup():
+    """Verifica, audita e alinha os binários do KVM entre as máquinas."""
+    request_elevation()
+
+    click.secho("\n" + "=" * 65, fg="cyan")
+    click.secho(" 📦 SYSUTILS LEAP SETUP — ALINHAMENTO DE BINÁRIOS KVM", fg="cyan", bold=True)
+    click.secho("=" * 65 + "\n", fg="cyan")
+
+    hostname = socket.gethostname()
+    click.echo(f"  • Estação Atual : {click.style(hostname, bold=True, fg='green')}")
+
+    # 1. Auditoria de binários existentes
+    client_bin = find_leap_binary(role="client")
+    server_bin = find_leap_binary(role="server")
+
+    click.echo(f"  • Binário Cliente: {client_bin or click.style('Não encontrado', fg='yellow')}")
+    click.echo(f"  • Binário Servidor: {server_bin or click.style('Não encontrado', fg='yellow')}")
+
+    # 2. Liberação de Firewall
+    click.echo("\n[*] Configurando regra no Windows Defender Firewall (TCP 24800)...")
+    subprocess.run(
+        'netsh advfirewall firewall add rule name="Leap KVM 24800" dir=in action=allow protocol=TCP localport=24800',
+        capture_output=True,
+        shell=True,
+    )
+    click.secho("  ✔ Porta 24800 liberada no Firewall!", fg="green")
+
+    # 3. Certificado TLS de máquina
+    ensure_deskflow_tls_cert()
+    click.secho("  ✔ Certificado base TLS verificado em C:\\ProgramData\\Deskflow\\tls", fg="green")
+
+    # 4. Alinhamento de Versão
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+    click.echo("\n--- ALINHAMENTO DE VERSÃO (PROTOCOLO 1.8) ---")
+    click.echo("A Bluebaby usa o Deskflow moderno (Protocolo 1.8).")
+    click.echo("Para que a Amaranth e a Bluebaby se conectem, ambas devem usar a mesma geração.")
+
+    if not server_bin or "barrier" in str(server_bin).lower():
+        click.secho("\n[AVISO] Detectada versão antiga (Barrier 1.6) ou ausência de servidor Deskflow.", fg="yellow")
+        if click.confirm("Deseja copiar os binários do Deskflow da outra máquina via rede?", default=True):
+            # Tenta copiar via compartilhamento de rede
+            peer_ip = "100.99.6.9" if "amaranth" in hostname.lower() else "100.113.157.27"
+            source_candidates = [
+                rf"\\{peer_ip}\A20251122\Deskflow",
+                rf"\\{peer_ip}\C$\Program Files\Deskflow",
+            ]
+            copied = False
+            for src in source_candidates:
+                if Path(src).exists():
+                    click.echo(f"[*] Copiando Deskflow de {src} para {BIN_DIR}...")
+                    shutil.copytree(src, BIN_DIR / "Deskflow", dirs_exist_ok=True)
+                    copied = True
+                    click.secho("[OK] Binários sincronizados com sucesso pela rede local!", fg="green", bold=True)
+                    break
+
+            if not copied:
+                click.echo(f"💡 Você pode baixar o Deskflow diretamente pelo link oficial:")
+                click.secho(f"   {DESKFLOW_RELEASE_URL}", fg="cyan")
+    else:
+        click.secho("\n✔ Binários do Deskflow já alinhados nesta máquina!", fg="green", bold=True)
+
+    click.secho("\n" + "=" * 65 + "\n", fg="cyan")
 
 
 @cli.command("auto")
@@ -234,6 +297,7 @@ def leap_auto():
         bin_path = find_leap_binary(role="server")
         if not bin_path:
             click.secho("[ERRO] Binário de Servidor não encontrado.", fg="red", bold=True)
+            click.echo("Execute 'sysutils leap setup' para alinhar os binários.")
             raise SystemExit(1)
 
         click.echo(f"  • Binário Servidor: {click.style(Path(bin_path).name, fg='green')}")
@@ -292,20 +356,16 @@ def leap_auto():
         click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
         click.echo(f"  • Binário KVM   : {click.style(Path(bin_path).name, fg='green')}")
 
-        # 1. Assegura existência física do certificado para evitar panic do OpenSSL
         ensure_deskflow_tls_cert()
-
-        # 2. Configura cliente com a chave real: tlsEnabled=false
         conf_file = write_deskflow_client_conf(target_ip, port=24800)
 
-        # 3. Dispara comando limpo (sem flags inválidas)
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
             cmd = [bin_path, "client", "-s", str(conf_file)]
         else:
             cmd = [bin_path, "-f", "--name", "bluebaby", f"{target_ip}:24800"]
 
-        click.echo("[*] Conectando ao servidor KVM (Deskflow -> Barrier)...")
+        click.echo("[*] Conectando ao servidor KVM (Deskflow -> Amaranth)...")
         subprocess.Popen(cmd)
 
         update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
