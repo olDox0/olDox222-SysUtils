@@ -1,220 +1,120 @@
 # leap_sys/cli/cmd_leap.py
+"""
+Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
+Suporta auto-elevação UAC, detecção do Deskflow moderno e sincronia com Doxly.
+"""
 from __future__ import annotations
+
+import ctypes
+import json
 import os
 import socket
-import click
-import json
-import time
-import psutil
 import subprocess
+import sys
+import time
 from pathlib import Path
-from leap_sys.leap_engine import (
-    leap_installer,
-    leap_orchestration,
-    leap_daemon,
-    leap_discovery
-)
-from leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
+from typing import Optional
+import click
+
 from syncdiag.core import network_connect
 
-@click.group(name="leap")
-def cli():
-    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
-    pass
+STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
 
-@cli.command("setup")
-@click.option("--force", is_flag=True, help="Força novo download mesmo se os binários existirem.")
-def cmd_setup(force: bool):
-    """Verifica e baixa os binários headless necessários."""
-    click.secho("[*] Auditando binários do Input Leap...", fg="cyan")
-    ok, msg = leap_installer.ensure_binaries(force=force)
-    if ok:
-        click.secho(f"[OK] {msg}", fg="green", bold=True)
+
+# ═══════════════════════════════════════════════════════════════
+# UTILITÁRIOS: ELEVAÇÃO UAC E CONTRATO DOXLY
+# ═══════════════════════════════════════════════════════════════
+def is_admin() -> bool:
+    """Verifica se o processo atual possui privilégios de Administrador."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def request_elevation():
+    """Solicita elevação de privilégios via UAC do Windows e relança o comando."""
+    if is_admin():
+        return
+
+    click.secho("\n[*] Privilégios de Administrador necessários para o KVM.", fg="yellow")
+    click.echo("[*] Solicitando elevação via UAC do Windows...")
+
+    # Reconstrói os argumentos originais da chamada
+    params = " ".join([f'"{arg}"' if " " in arg else arg for arg in sys.argv])
+
+    # Dispara a janela de permissão do Windows (runas)
+    hinstance = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, params, None, 1
+    )
+
+    if hinstance > 32:
+        # Relançado com sucesso no terminal elevado
+        sys.exit(0)
     else:
-        click.secho(f"[ERRO] {msg}", fg="red", bold=True)
-        raise click.Abort()
+        click.secho("[ERRO] Elevação recusada pelo usuário. O KVM pode apresentar falhas de foco.", fg="red")
 
-    if os.name == 'nt':
-        click.secho("\n[*] Configurando permissões de Hook para o Editor (Doxly/Lite XL)...", fg="cyan")
-        ok_elev, msg_elev = leap_elevation.ensure_litexl_admin_elevation()
-        if ok_elev:
-            click.secho(f"✔ [ARES] {msg_elev}", fg="green")
-            click.secho("  💡 O editor agora solicitará elevação (UAC) automaticamente ao abrir pelo ícone,", fg="yellow")
-            click.secho("     garantindo que o Leap/KVM funcione sem travamentos de mouse/teclado.", fg="yellow")
-        else:
-            click.secho(f"⚠ [AVISO] {msg_elev}", fg="yellow")
 
-@cli.command("host")
-@click.option("--client", default=None, help="Hostname ou apelido do computador cliente (ex: bluebaby).")
-@click.option("--pos", type=click.Choice(["right", "left", "above", "below"]), default="right", show_default=True,
-              help="Posição física do cliente em relação a este servidor.")
-@click.option("--port", default=24800, show_default=True, help="Porta de escuta TCP.")
-@click.option("--no-firewall", is_flag=True, help="Pula verificação de regra no Windows Firewall.")
-def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
-    """Inicia este PC como SERVIDOR (onde mouse e teclado estão conectados fisicamente)."""
-    server_host = socket.gethostname()
+def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, port: int = 24800):
+    """Atualiza o contrato ~/.doxoade/leap_state.json lido pela barra do Doxly."""
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "active": active,
+            "mode": mode,
+            "target": target,
+            "server_ip": server_ip,
+            "port": port,
+            "updated_at": int(time.time()),
+        }
+        STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
-    def _get_local_ips() -> list[tuple[str, str]]:
-        ips = []
-        for iface, addrs in psutil.net_if_addrs().items():
-            for addr in addrs:
-                if addr.family == socket.AF_INET and not addr.address.startswith("127."):
-                    ips.append((iface, addr.address))
-        return ips
 
-    if not leap_installer.is_installed():
-        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
-        ok, msg = leap_installer.ensure_binaries()
-        if not ok:
-            click.secho(f"[ERRO] {msg}", fg="red")
-            raise click.Abort()
-
-    if not client:
-        click.echo(f"Computador Servidor atual: {click.style(server_host, bold=True, fg='cyan')}")
-        client = click.prompt("Nome do computador cliente de destino (ex: bluebaby)")
-
-    if not no_firewall:
-        if not leap_firewall.is_port_open(port):
-            click.secho(f"[*] Porta {port} fechada no Firewall do Windows. Solicitando liberação...", fg="yellow")
-            if leap_elevation.is_admin():
-                leap_firewall.open_firewall_port(port, "InputLeap_Server")
-                click.secho(f"[OK] Porta {port} liberada no Firewall.", fg="green")
-            else:
-                click.secho("[AVISO] Rode o terminal como Administrador ou use '--no-firewall' se a porta já estiver aberta.", fg="yellow")
-
-    click.secho(f"[*] Montando topologia: [{server_host}] ===({pos.upper()})===> [{client}]", fg="cyan")
-    success, log = leap_orchestration.start_host(server_name=server_host, client_name=client, position=pos, port=port)
-    if success:
-        click.secho(f"\n[OK] Servidor KVM ativo em segundo plano na porta {port}!", fg="green", bold=True)
-        click.echo("\n--- ENDEREÇOS DO SERVIDOR (AMARANTH) ---")
-        for iface, ip in _get_local_ips():
-            click.echo(f"  • {iface:<25} : {click.style(ip, fg='cyan', bold=True)}")
-        click.echo("----------------------------------------")
-        click.echo(f"👉 No outro computador ({client}), execute:")
-        click.secho(f"   sysutils leap join <IP_ESCOLHIDO_ACIMA> --port {port}\n", fg="yellow", bold=True)
-        _update_leap_state(
-          active=True, 
-          mode="host", 
-          target=client, 
-          server_ip="192.168.18.52", 
-          port=port
-        )
-    else:
-        click.secho(f"[FALHA] {log}", fg="red")
-
-@cli.command("join")
-@click.argument("server_target", required=False)
-@click.option("--name", default=None, help="Nome de tela registrado no servidor (ex: bluebaby).")
-@click.option("--port", default=24800, show_default=True, help="Porta do servidor.")
-def cmd_join(server_target: str | None, name: str | None, port: int):
-    """Conecta este PC como CLIENTE (receberá os comandos de mouse/teclado)."""
-    if not leap_installer.is_installed():
-        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
-        ok, msg = leap_installer.ensure_binaries()
-        if not ok:
-            click.secho(f"[ERRO] {msg}", fg="red")
-            raise click.Abort()
-
-    client_host = name or "bluebaby"
-
-    if not server_target:
-        click.secho("[ERRO] IP do servidor (Amaranth) é obrigatório para execução em background.", fg="red", bold=True)
-        click.secho("Uso correto: sysutils leap join 192.168.18.52 --name bluebaby", fg="yellow")
-        raise click.Abort()
-
-    click.secho(f"[*] Conectando com nome de tela [{click.style(client_host, bold=True)}] ao servidor {server_target}:{port}...", fg="cyan")
-    success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
-    if success:
-        click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
-        _update_leap_state(
-          active=True, 
-          mode="client", 
-          target=server_target, 
-          server_ip=server_target, 
-          port=port
-        )
-    else:
-        click.secho(f"[FALHA] {log}", fg="red", bold=True)
-        click.secho("💡 Dica: Verifique se o Firewall do Windows no Servidor permite a porta 24800.", fg="yellow")
-
-@cli.command("status")
-def cmd_status():
-    """Verifica se os daemons do Input Leap estão rodando."""
-    status = leap_daemon.get_running_status()
-    click.echo("\n--- STATUS DO LEAP SYS ---")
-    if status["server_running"]:
-        click.secho(f"  ● Servidor: ATIVO (PID: {status['server_pids']})", fg="green", bold=True)
-    else:
-        click.echo("  ○ Servidor: Inativo")
-    if status["client_running"]:
-        click.secho(f"  ● Cliente:  ATIVO (PID: {status['client_pids']})", fg="green", bold=True)
-    else:
-        click.echo("  ○ Cliente:  Inativo")
-    click.echo("--------------------------\n")
-
-@cli.command("stop")
-def cmd_stop():
-    """Encerra todos os processos do Input Leap (Server e Client)."""
-    killed = leap_daemon.stop_all()
-    if killed > 0:
-        _update_leap_state(active=False, mode="idle")
-        click.secho(f"[OK] {killed} processo(s) do Input Leap finalizado(s).", fg="green")
-    else:
-        click.echo("[INFO] Nenhum processo ativo encontrado.")
-
-@cli.command("firewall")
-def cmd_firewall():
-    """Cadastra regras de liberação de porta e executáveis no Firewall do Windows."""
-    if not leap_elevation.is_admin():
-        click.secho("[AVISO] Abra o terminal como Administrador para aplicar as regras no Firewall.", fg="yellow", bold=True)
-    click.secho("[*] Cadastrando regras de liberação no Firewall do Windows...", fg="cyan")
-    ok, logs = leap_firewall.authorize_firewall()
-    for l in logs:
-        click.echo(f"  {l}")
-    if ok:
-        click.secho("[SUCESSO] Firewall do Windows totalmente autorizado para o LeapSys.", fg="green", bold=True)
-
-@cli.command("setup-ux")
-def cmd_setup_ux():
-    """Forja atalho soberano com permissão de Administrador."""
-    click.secho("[*] Forjando Atalho Soberano na Área de Trabalho...", fg="cyan")
-    ok, msg = leap_elevation.create_sovereign_shortcut()
-    if ok:
-        click.secho(f"✔ [SUCESSO] {msg}", fg="green", bold=True)
-        click.secho("💡 Fixe este atalho na sua Barra de Tarefas. O Windows pedirá UAC automaticamente.", fg="yellow")
-        click.secho("   O Leap/KVM funcionará perfeitamente sem travamentos de mouse/teclado.", fg="yellow")
-    else:
-        click.secho(f"❌ [FALHA] {msg}", fg="red", bold=True)
-
-def _update_leap_state(active: bool, mode: str = "idle", target: str = "", server_ip: str = "", port: int = 24800):
-    """Sincroniza o contrato soberano com o Doxly/Lite XL HUD em ~/.doxoade/leap_state.json."""
-    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or ".")
-    dox_dir = home / ".doxoade"
-    dox_dir.mkdir(parents=True, exist_ok=True)
-    state_file = dox_dir / "leap_state.json"
-    
-    data = {
-        "active": active,
-        "mode": mode,
-        "target": target,
-        "server_ip": server_ip,
-        "port": port,
-        "updated_at": time.time()
-    }
-    state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-def build_leap_command(bin_path: str, mode: str, args: list) -> list:
-    """Garante compatibilidade com Deskflow moderno (deskflow-core) e legados."""
+def build_deskflow_cmd(bin_path: str, mode: str, args: list[str]) -> list[str]:
+    """
+    Garante compatibilidade: se for 'deskflow-core.exe', injeta 'client' ou 'server'
+    obrigatoriamente como primeiro argumento.
+    """
     cmd = [bin_path]
-    # Se for o binário unificado deskflow-core, injeta obrigatoriamente 'client' ou 'server'
-    if "deskflow-core" in os.path.basename(bin_path).lower():
+    bin_name = Path(bin_path).name.lower()
+    if "deskflow-core" in bin_name:
         cmd.append(mode)  # 'client' ou 'server'
     cmd.extend(args)
     return cmd
 
+
+def find_deskflow_binary() -> Optional[str]:
+    """Localiza o binário do Deskflow / Input Leap no sistema."""
+    possible_paths = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Deskflow" / "deskflow-core.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Deskflow" / "deskflow-client.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Input Leap" / "input-leapc.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Barrier" / "barrierc.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Deskflow" / "deskflow-core.exe",
+    ]
+    for p in possible_paths:
+        if p.exists():
+            return str(p)
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# GRUPO CLI LEAP
+# ═══════════════════════════════════════════════════════════════
+@click.group()
+def cli():
+    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
+    pass
+
+
 @cli.command("auto")
 def leap_auto():
-    """🧙 Assistente Inteligente: Configura e conecta o KVM (Mouse/Teclado) automaticamente."""
+    """🧙 Assistente Inteligente: Auto-elevação, configuração e conexão transparente."""
+    # 1. Garante elevação UAC imediata
+    request_elevation()
+
     click.secho("\n" + "=" * 65, fg="cyan")
     click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO INTELIGENTE", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
@@ -222,37 +122,47 @@ def leap_auto():
     hostname = socket.gethostname().lower()
     is_server = "amaranth" in hostname
 
+    bin_path = find_deskflow_binary()
+    if not bin_path:
+        click.secho("[ERRO] Binário do Deskflow/Input Leap não encontrado.", fg="red", bold=True)
+        raise SystemExit(1)
+
     if is_server:
-        # ═══ COMPORTAMENTO NA AMARANTH (SERVIDOR) ═══
+        # ═══ AMARANTH (SERVIDOR MASTER) ═══
         click.secho("  • Papel Detectado: SERVIDOR MASTER (Amaranth)", fg="green", bold=True)
         click.echo("  • Compartilhando teclado e mouse com: bluebaby\n")
 
-        # 1. Liberação do Firewall
-        click.echo("[*] Verificando regra de Firewall na porta 24800...")
+        # Libera porta 24800
         subprocess.run(
             'netsh advfirewall firewall add rule name="Deskflow Leap 24800" dir=in action=allow protocol=TCP localport=24800',
             capture_output=True,
             shell=True,
         )
 
-        # 2. Inicia o servidor com a Bluebaby à direita
-        ctx = click.get_current_context()
-        click.echo("[*] Disparando servidor KVM Deskflow...")
-        try:
-            # Invoca o comando 'host' existente configurando 'bluebaby'
-            ctx.invoke(host, client_name="bluebaby", position="right")
-        except Exception as e:
-            # Fallback direto caso chame via subprocess
-            subprocess.Popen(["sysutils", "leap", "host", "--client", "bluebaby"])
+        # Monta comando do servidor
+        config_path = Path.home() / ".doxoade" / "deskflow_server.conf"
+        # Garante configuração mínima se não existir
+        if not config_path.exists():
+            config_content = (
+                "section: screens\n  Amaranth:\n  bluebaby:\nend\n"
+                "section: links\n  Amaranth:\n    right = bluebaby\n"
+                "  bluebaby:\n    left = Amaranth\nend\n"
+            )
+            config_path.write_text(config_content, encoding="utf-8")
 
-        click.secho("\n✔ Servidor ativo e aguardando conexão da Bluebaby!", fg="green", bold=True)
+        server_args = ["-c", str(config_path), "--address", ":24800"]
+        cmd = build_deskflow_cmd(bin_path, "server", server_args)
+
+        subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
+        click.secho("\n[OK] Servidor ativo e aguardando a Bluebaby!", fg="green", bold=True)
 
     else:
-        # ═══ COMPORTAMENTO NA BLUEBABY (CLIENTE) ═══
+        # ═══ BLUEBABY (CLIENTE SECUNDÁRIO) ═══
         click.secho("  • Papel Detectado: CLIENTE SECUNDÁRIO (Bluebaby)", fg="yellow", bold=True)
-        click.echo("  • Buscando servidor Amaranth na rede...\n")
+        click.echo("  • Localizando servidor Amaranth...\n")
 
-        # 1. Procura o IP da Amaranth via Tailscale ou IP local padrão
+        # 1. Busca por Tailscale primeiro
         target_ip = None
         peers = network_connect.get_tailscale_peers()
         for p in peers:
@@ -260,30 +170,38 @@ def leap_auto():
                 target_ip = p["ip"]
                 break
 
-        # Fallback para IP de LAN conhecido caso Tailscale não esteja em lista
+        # 2. Fallbacks de rede local
         if not target_ip:
-            for candidate in ["100.113.157.27", "192.168.18.52"]:
-                if network_connect.probe_smb_port(candidate, port=24800, timeout=1.5):
+            for candidate in ["192.168.18.52", "100.113.157.27"]:
+                if network_connect.probe_smb_port(candidate, port=24800, timeout=1.0):
                     target_ip = candidate
                     break
 
         if not target_ip:
-            target_ip = "100.113.157.27"  # IP fixo do Tailscale da Amaranth
+            target_ip = "192.168.18.52"
 
-        click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
-
-        # 2. Testa se a porta 24800 está ouvindo
+        click.echo(f"  • Servidor Alvo: {click.style(target_ip, fg='cyan', bold=True)}")
         click.echo("[*] Testando porta KVM (24800)...")
-        if not network_connect.probe_smb_port(target_ip, port=24800, timeout=2.0):
-            click.secho(f"\n[AVISO] A porta 24800 em {target_ip} não respondeu.", fg="yellow")
-            click.echo("Certifique-se de ter rodado 'sysutils leap auto' primeiro na Amaranth.")
 
-        # 3. Dispara a conexão com nome 'bluebaby'
-        click.echo(f"\n[*] Conectando com tela [bluebaby] em {target_ip}:24800...")
-        ctx = click.get_current_context()
-        try:
-            ctx.invoke(join, server_ip=target_ip, name="bluebaby")
-        except Exception:
-            subprocess.Popen(["sysutils", "leap", "join", target_ip, "--name", "bluebaby"])
+        # Inicia o cliente com o modo 'client' injetado
+        client_args = ["--name", "bluebaby", f"{target_ip}:24800"]
+        cmd = build_deskflow_cmd(bin_path, "client", client_args)
+
+        click.echo(f"[*] Disparando Deskflow Core...")
+        proc = subprocess.Popen(cmd)
+
+        update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
+        click.secho("\n[OK] Cliente conectado com sucesso ao Amaranth!", fg="green", bold=True)
+        click.echo("👉 Mova o mouse da Amaranth para a direita para controlar a Bluebaby.")
 
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
+
+
+@cli.command("stop")
+def leap_stop():
+    """Encerra daemons do Deskflow/Input Leap e desativa estado no Doxly."""
+    for proc in ["deskflow-core.exe", "deskflow-client.exe", "deskflow-server.exe", "barrierc.exe", "barriers.exe"]:
+        subprocess.run(f"taskkill /IM {proc} /F", capture_output=True, shell=True)
+
+    update_doxly_state(False, "idle", "", "")
+    click.secho("[OK] Processos do KVM encerrados e estado atualizado.", fg="green")
