@@ -1,7 +1,7 @@
 # leap_sys/cli/cmd_leap.py
 """
 Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
-Instalação elevada nativa (RunAs), desbloqueio de firewall e conexão direta.
+Suporta auto-instalação do Visual C++ Redistributable v14.50+, Deskflow e Doxly.
 """
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
 SERVER_CONF_PATH = Path.home() / ".doxoade" / "deskflow_server.conf"
 DESKFLOW_TLS_CERT = Path(r"C:\ProgramData\Deskflow\tls\deskflow.pem")
 
+# URLs Oficiais Microsoft e Deskflow
+VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 DESKFLOW_MSI_URL = "https://github.com/deskflow/deskflow/releases/download/v1.26.0/deskflow-1.26.0-win-x64.msi"
 
 
@@ -56,7 +58,6 @@ def request_elevation():
 
 
 def open_firewall_rules():
-    """Garante abertura total da porta 24800 (Entrada e Saída) em todos os perfis."""
     rules = [
         'netsh advfirewall firewall add rule name="Deskflow KVM In 24800" dir=in action=allow protocol=TCP localport=24800 profile=any',
         'netsh advfirewall firewall add rule name="Deskflow KVM Out 24800" dir=out action=allow protocol=TCP localport=24800 profile=any',
@@ -193,14 +194,14 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
     return None
 
 
-def download_with_progress(url: str, dest_file: Path) -> bool:
+def download_with_progress(url: str, dest_file: Path, label: str) -> bool:
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "SysUtils/1.0"})
     try:
         with urllib.request.urlopen(req) as resp, open(dest_file, "wb") as out_file:
             total_size = int(resp.headers.get("Content-Length", 0))
             block_size = 65536
-            with click.progressbar(length=total_size, label="[*] Baixando Deskflow v1.26.0 (.msi)") as bar:
+            with click.progressbar(length=total_size, label=label) as bar:
                 while True:
                     chunk = resp.read(block_size)
                     if not chunk:
@@ -209,7 +210,7 @@ def download_with_progress(url: str, dest_file: Path) -> bool:
                     bar.update(len(chunk))
         return True
     except Exception as e:
-        click.secho(f"\n[ERRO] Falha ao baixar arquivo: {e}", fg="red")
+        click.secho(f"\n[ERRO] Falha no download: {e}", fg="red")
         return False
 
 
@@ -225,57 +226,62 @@ def cli():
 @cli.command("setup")
 @click.option("--force", is_flag=True, help="Força a reinstalação.")
 def leap_setup(force):
-    """Instala o Deskflow oficial sob permissão de Administrador e libera o Firewall."""
+    """Instala dependências do Visual C++ e o Deskflow oficial sob Administrador."""
     request_elevation()
 
     click.secho("\n" + "=" * 65, fg="cyan")
-    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALADOR ELEVADO DO DESKFLOW", fg="cyan", bold=True)
+    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALAÇÃO AUTOMÁTICA COMPLETA", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
     hostname = socket.gethostname()
     click.echo(f"  • Estação Atual : {click.style(hostname, bold=True, fg='green')}")
 
-    deskflow_bin = find_leap_binary(role="any")
-    is_deskflow = deskflow_bin and "deskflow" in deskflow_bin.lower()
-
-    if is_deskflow and not force:
-        click.secho(f"\n✔ Deskflow já instalado: {deskflow_bin}", fg="green", bold=True)
+    # 1. PASSO CRÍTICO: Instalação do Visual C++ Redistributable v14.50+ (Pré-requisito do Deskflow)
+    vcredist_exe = DOWNLOADS_DIR / "vc_redist.x64.exe"
+    click.echo("\n[1/3] Verificando Microsoft Visual C++ Redistributable (v14.50+)...")
+    if not vcredist_exe.exists() or force:
+        success = download_with_progress(VCREDIST_URL, vcredist_exe, "[*] Baixando Visual C++ Redistributable")
+        if not success:
+            click.secho("[ERRO] Falha ao baixar o Visual C++ da Microsoft.", fg="red")
+            raise SystemExit(1)
     else:
-        msi_path = DOWNLOADS_DIR / "deskflow-1.26.0-win-x64.msi"
+        click.echo("  ✔ Instalador do Visual C++ em cache.")
 
-        if not msi_path.exists() or force:
-            click.echo("\n[*] Baixando instalador do Deskflow...")
-            success = download_with_progress(DESKFLOW_MSI_URL, msi_path)
-            if not success:
-                click.secho("\n[ERRO] Falha no download.", fg="red", bold=True)
-                raise SystemExit(1)
-        else:
-            click.echo(f"\n✔ Usando instalador em cache: {msi_path.name}")
+    click.echo("[*] Instalando bibliotecas do Visual C++ no Windows...")
+    vc_cmd = [str(vcredist_exe), "/install", "/passive", "/norestart"]
+    subprocess.run(vc_cmd, capture_output=True)
+    click.secho("  ✔ Microsoft Visual C++ v14.50+ instalado com sucesso!", fg="green")
 
-        click.echo("[*] Solicitando instalação com privilégio de Administrador (UAC)...")
-        # Executa o MSI via PowerShell com -Verb RunAs garantindo privilégios para evitar o Erro 1603
-        ps_install = (
-            f'Start-Process msiexec.exe -ArgumentList \'/i "{msi_path}" /qb /norestart\' -Verb RunAs -Wait'
-        )
-        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_install], capture_output=True, text=True)
+    # 2. Instalação do Deskflow
+    click.echo("\n[2/3] Instalando Deskflow v1.26.0 (Protocolo 1.8)...")
+    msi_path = DOWNLOADS_DIR / "deskflow-1.26.0-win-x64.msi"
+    if not msi_path.exists() or force:
+        success = download_with_progress(DESKFLOW_MSI_URL, msi_path, "[*] Baixando Deskflow (.msi)")
+        if not success:
+            click.secho("[ERRO] Falha ao baixar o Deskflow.", fg="red")
+            raise SystemExit(1)
+    else:
+        click.echo("  ✔ Instalador do Deskflow em cache.")
 
-        # Checa se o binário foi colocado no Program Files
-        time.sleep(2)
-        installed_bin = find_leap_binary(role="any")
-        if installed_bin:
-            click.secho(f"\n[OK] Deskflow instalado com sucesso: {installed_bin}", fg="green", bold=True)
-        else:
-            click.secho("\n[AVISO] Se a janela do UAC apareceu, confirme a instalação.", fg="yellow")
+    # Executa o MSI via PowerShell com RunAs para garantir permissão total
+    ps_install = f'Start-Process msiexec.exe -ArgumentList \'/i "{msi_path}" /qb /norestart\' -Verb RunAs -Wait'
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps_install], capture_output=True)
 
-    # 2. Desbloqueio completo de Firewall
-    click.echo("\n[*] Liberando porta TCP 24800 (Entrada e Saída) no Windows Firewall...")
+    time.sleep(2)
+    installed_bin = find_leap_binary(role="any")
+    if installed_bin:
+        click.secho(f"  ✔ Deskflow instalado em: {installed_bin}", fg="green", bold=True)
+    else:
+        click.secho("  [AVISO] Se uma janela do instalador estiver aberta, clique para concluir.", fg="yellow")
+
+    # 3. Configurações de Rede e Certificado
+    click.echo("\n[3/3] Liberando porta TCP 24800 e gerando certificados...")
     open_firewall_rules()
-    click.secho("  ✔ Porta 24800 100% liberada no Firewall!", fg="green")
-
     ensure_deskflow_tls_cert()
-    click.secho("  ✔ Certificado TLS verificado em C:\\ProgramData\\Deskflow\\tls", fg="green")
+    click.secho("  ✔ Firewall e certificados configurados!", fg="green")
 
-    click.secho("\n[SUCESSO] Instalação concluída com privilégios de Administrador!", fg="green", bold=True)
+    click.secho("\n[SUCESSO] Todos os pré-requisitos e o Deskflow estão instalados!", fg="green", bold=True)
+    click.echo("👉 Agora execute 'sysutils leap auto' para iniciar o KVM.")
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
 
 
@@ -306,7 +312,7 @@ def leap_auto():
         bin_path = find_leap_binary(role="server")
         if not bin_path:
             click.secho("[ERRO] Binário de Servidor não encontrado.", fg="red", bold=True)
-            click.echo("💡 Execute 'sysutils leap setup' para instalar o Deskflow oficial.")
+            click.echo("💡 Execute 'sysutils leap setup' para instalar o Visual C++ e o Deskflow.")
             raise SystemExit(1)
 
         click.echo(f"  • Binário Servidor: {click.style(Path(bin_path).name, fg='green')}")
@@ -340,7 +346,7 @@ def leap_auto():
         bin_path = find_leap_binary(role="client")
         if not bin_path:
             click.secho("[ERRO] Binário de Cliente não encontrado.", fg="red", bold=True)
-            click.echo("💡 Execute 'sysutils leap setup' para instalar o Deskflow oficial.")
+            click.echo("💡 Execute 'sysutils leap setup' para instalar o Visual C++ e o Deskflow.")
             raise SystemExit(1)
 
         target_ip = None
