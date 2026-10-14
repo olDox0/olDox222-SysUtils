@@ -1,10 +1,11 @@
 # leap_sys/cli/cmd_leap.py
 """
 Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
-Suporta auto-elevação UAC, detecção universal de binários (Server/Client) e Doxly.
+Suporta auto-elevação UAC, auto-injeção de configurações Deskflow e integração Doxly.
 """
 from __future__ import annotations
 
+import configparser
 import ctypes
 import json
 import os
@@ -14,12 +15,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import click
 
 from syncdiag.core import network_connect
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
+CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
+SERVER_CONF_PATH = Path.home() / ".doxoade" / "deskflow_server.conf"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -41,16 +45,13 @@ def request_elevation():
     click.secho("\n[*] Privilégios de Administrador necessários para o KVM.", fg="yellow")
     click.echo("[*] Solicitando elevação via UAC do Windows...")
 
-    # Monta os argumentos para relançar
     params = " ".join([f'"{arg}"' if " " in arg else arg for arg in sys.argv])
-
-    # Dispara a caixa do UAC
     hinstance = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", sys.executable, params, None, 1
     )
 
     if hinstance > 32:
-        sys.exit(0)  # Relançado com sucesso no terminal elevado
+        sys.exit(0)
     else:
         click.secho("[ERRO] Elevação UAC cancelada pelo usuário.", fg="red")
 
@@ -72,29 +73,77 @@ def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, por
         pass
 
 
+def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
+    """
+    Gera arquivo de configuração que o deskflow-core client exige
+    para resolver o erro fatal 'No server addresses configured'.
+    """
+    CLIENT_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        f"[client]\n"
+        f"remoteHost={server_ip}\n"
+        f"port={port}\n"
+    )
+    CLIENT_CONF_PATH.write_text(content, encoding="utf-8")
+
+    # Atualiza também o Deskflow.conf padrão do usuário no AppData por garantia
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        try:
+            user_conf = Path(appdata) / "Deskflow" / "Deskflow.conf"
+            user_conf.parent.mkdir(parents=True, exist_ok=True)
+            cfg = configparser.ConfigParser()
+            if user_conf.exists():
+                cfg.read(str(user_conf), encoding="utf-8")
+            if not cfg.has_section("client"):
+                cfg.add_section("client")
+            cfg.set("client", "remoteHost", server_ip)
+            with open(user_conf, "w", encoding="utf-8") as f:
+                cfg.write(f)
+        except Exception:
+            pass
+
+    return CLIENT_CONF_PATH
+
+
 def find_leap_binary(role: str = "any") -> Optional[str]:
     """
-    Localiza o binário correto (Server ou Client) para Deskflow, Input Leap ou Barrier.
+    Scanner Universal: Localiza executáveis de KVM em binários locais do projeto,
+    instaladores padrão do Windows e variáveis de sistema.
     """
     names_to_check = []
     if role in ("client", "any"):
-        names_to_check.extend(["deskflow-core", "deskflow-client", "input-leapc", "barrierc"])
+        names_to_check.extend(["deskflow-core", "deskflow-client", "input-leapc", "barrierc", "synergyc"])
     if role in ("server", "any"):
-        names_to_check.extend(["deskflow-core", "deskflow-server", "input-leaps", "barriers"])
+        names_to_check.extend(["deskflow-core", "deskflow-server", "input-leaps", "barriers", "synergys"])
 
-    # 1. Verifica no PATH do sistema
+    # 1. Checa no PATH
     for name in names_to_check:
         found = shutil.which(name)
         if found:
             return found
 
-    # 2. Varre pastas padrões de instalação no Windows
+    # 2. Checa binários portáteis dentro do próprio projeto SysUtils
+    project_bin_dirs = [
+        PROJECT_ROOT / "data" / "bin",
+        PROJECT_ROOT / "leap_sys" / "bin",
+        PROJECT_ROOT / "bin",
+    ]
+    for bdir in project_bin_dirs:
+        if bdir.exists():
+            for name in names_to_check:
+                p = bdir / f"{name}.exe"
+                if p.exists():
+                    return str(p)
+
+    # 3. Pastas Padrões do Windows
     roots = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
         Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
         Path(os.environ.get("LocalAppData", "")) / "Programs",
+        Path(os.environ.get("ProgramData", r"C:\ProgramData")),
     ]
-    subdirs = ["Deskflow", "Input Leap", "Barrier", "Synergy"]
+    subdirs = ["Deskflow", "Input Leap", "Barrier", "Synergy", "InputLeap"]
 
     for root in roots:
         for sdir in subdirs:
@@ -102,15 +151,15 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
             if not base.exists():
                 continue
             for name in names_to_check:
-                candidate = base / f"{name}.exe"
-                if candidate.exists():
-                    return str(candidate)
+                p = base / f"{name}.exe"
+                if p.exists():
+                    return str(p)
 
     return None
 
 
 # ═══════════════════════════════════════════════════════════════
-# GRUPO CLI LEAP
+# COMANDOS CLI
 # ═══════════════════════════════════════════════════════════════
 @click.group()
 def cli():
@@ -121,7 +170,6 @@ def cli():
 @cli.command("auto")
 def leap_auto():
     """🧙 Assistente Inteligente: Auto-elevação, configuração e conexão KVM."""
-    # 1. Solicita UAC automaticamente se não for Admin
     request_elevation()
 
     click.secho("\n" + "=" * 65, fg="cyan")
@@ -138,10 +186,11 @@ def leap_auto():
 
         bin_path = find_leap_binary(role="server")
         if not bin_path:
-            click.secho("[ERRO] Binário de Servidor (input-leaps / barriers / deskflow) não encontrado.", fg="red", bold=True)
+            click.secho("[ERRO] Binário de Servidor não encontrado (input-leaps / barriers / deskflow).", fg="red", bold=True)
+            click.echo("💡 Dica: Verifique se o Deskflow ou Barrier está instalado nesta máquina.")
             raise SystemExit(1)
 
-        # Garante regra no Firewall
+        click.echo(f"  • Binário Servidor: {click.style(Path(bin_path).name, fg='green')}")
         click.echo("[*] Garantindo porta 24800 liberada no Firewall...")
         subprocess.run(
             'netsh advfirewall firewall add rule name="Leap KVM 24800" dir=in action=allow protocol=TCP localport=24800',
@@ -149,22 +198,22 @@ def leap_auto():
             shell=True,
         )
 
-        # Garante arquivo de topologia
-        config_path = Path.home() / ".doxoade" / "deskflow_server.conf"
+        # Monta topologia
+        SERVER_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
         config_content = (
             "section: screens\n  Amaranth:\n  bluebaby:\nend\n"
             "section: links\n  Amaranth:\n    right = bluebaby\n"
             "  bluebaby:\n    left = Amaranth\nend\n"
         )
-        config_path.write_text(config_content, encoding="utf-8")
+        SERVER_CONF_PATH.write_text(config_content, encoding="utf-8")
 
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800"]
+            cmd = [bin_path, "server", "-s", str(SERVER_CONF_PATH), "--address", ":24800"]
         else:
-            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800"]
+            cmd = [bin_path, "-f", "--config", str(SERVER_CONF_PATH), "--address", ":24800"]
 
-        click.echo(f"[*] Disparando Servidor KVM: {Path(bin_path).name}...")
+        click.echo(f"[*] Disparando Servidor KVM...")
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
 
         update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
@@ -177,10 +226,10 @@ def leap_auto():
 
         bin_path = find_leap_binary(role="client")
         if not bin_path:
-            click.secho("[ERRO] Binário de Cliente (deskflow-core / input-leapc) não encontrado.", fg="red", bold=True)
+            click.secho("[ERRO] Binário de Cliente não encontrado.", fg="red", bold=True)
             raise SystemExit(1)
 
-        # 1. Busca IP da Amaranth via Tailscale ou Wi-Fi
+        # 1. Localiza IP da Amaranth
         target_ip = None
         peers = network_connect.get_tailscale_peers()
         for p in peers:
@@ -201,16 +250,17 @@ def leap_auto():
         click.echo(f"  • Binário KVM   : {click.style(Path(bin_path).name, fg='green')}")
         click.echo("[*] Testando porta KVM (24800)...")
 
-        # 2. Constrói o comando do cliente com a sintaxe precisa
+        # 2. Configura e dispara o cliente
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            # Deskflow moderno: NÃO aceita flag --name
-            cmd = [bin_path, "client", target_ip]
+            # Injeta configuração para eliminar 'No server addresses configured'
+            conf_file = write_deskflow_client_conf(target_ip, port=24800)
+            cmd = [bin_path, "client", "-s", str(conf_file)]
         else:
-            # Barrier / Input Leap legados
+            # Binários legados (Barrier/Input Leap)
             cmd = [bin_path, "-f", "--name", "bluebaby", f"{target_ip}:24800"]
 
-        click.echo("[*] Conectando ao servidor...")
+        click.echo("[*] Conectando ao servidor Deskflow...")
         subprocess.Popen(cmd)
 
         update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
