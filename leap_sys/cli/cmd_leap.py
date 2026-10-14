@@ -64,50 +64,75 @@ def _get_installed_paths_from_registry() -> List[Path]:
 
 
 def find_kvm_binary(role: str = "server") -> Optional[str]:
-    """Localiza qualquer binário KVM ativo (Barrier, Deskflow ou Input Leap)."""
-    target_names = []
-    if role == "server":
-        target_names = ["barriers.exe", "deskflow-core.exe", "inputleaps.exe"]
-    else:
-        target_names = ["barrierc.exe", "deskflow-core.exe", "inputleapc.exe"]
+    """
+    Localiza o executável KVM priorizando o Barrier v2.4 (mais estável e leve).
+    """
+    target_barrier = "barriers.exe" if role == "server" else "barrierc.exe"
+    target_deskflow = "deskflow-core.exe"
 
-    # 1. PATH do Sistema
-    for name in target_names:
-        in_path = shutil.which(name)
-        if in_path:
-            return in_path
+    # 1. PRIORIDADE MÁXIMA: Binários do Barrier portáteis no próprio repositório SysUtils
+    project_root = Path(__file__).resolve().parents[2]
+    local_bin = project_root / "bin" / "input-leap" / target_barrier
+    if local_bin.exists():
+        return str(local_bin)
 
-    # 2. Varredura via Registro do Windows (Mais confiável)
-    for reg_dir in _get_installed_paths_from_registry():
-        for name in target_names:
-            candidate = reg_dir / name
-            if candidate.exists():
-                return str(candidate)
-
-    # 3. Varredura em pastas clássicas do sistema (x86 e x64)
+    # 2. SEGUNDA PRIORIDADE: Barrier instalado no Windows (Program Files x86 / x64)
     prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
     prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     local_appdata = os.environ.get("LocalAppData", "")
-    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
 
-    search_dirs = [
+    barrier_dirs = [
         Path(prog_files_x86) / "Barrier",
         Path(prog_files) / "Barrier",
-        Path(prog_files_x86) / "Deskflow",
-        Path(prog_files) / "Deskflow",
-        Path(prog_files) / "Input Leap",
         Path(local_appdata) / "Programs" / "Barrier",
-        Path(local_appdata) / "Programs" / "Deskflow",
-        Path(program_data) / "Barrier",
     ]
+    for directory in barrier_dirs:
+        candidate = directory / target_barrier
+        if candidate.exists():
+            return str(candidate)
 
-    for directory in search_dirs:
-        for name in target_names:
-            candidate = directory / name
-            if candidate.exists():
-                return str(candidate)
+    # 3. TERCEIRA PRIORIDADE: Barrier no PATH do sistema
+    in_path_barrier = shutil.which(target_barrier)
+    if in_path_barrier:
+        return in_path_barrier
 
-    return 
+    # 4. FALLBACK: Deskflow (se o Barrier não existir no sistema)
+    deskflow_dirs = [
+        Path(prog_files) / "Deskflow",
+        Path(prog_files_x86) / "Deskflow",
+        Path(local_appdata) / "Programs" / "Deskflow",
+    ]
+    for directory in deskflow_dirs:
+        candidate = directory / target_deskflow
+        if candidate.exists():
+            return str(candidate)
+
+    in_path_deskflow = shutil.which(target_deskflow)
+    if in_path_deskflow:
+        return in_path_deskflow
+
+    return None
+
+
+def run_kvm_client(bin_path: str, server_address: str, client_name: str = "bluebaby") -> subprocess.Popen:
+    """
+    Executa o cliente KVM montando a linha de comando exata para Barrier ou Deskflow.
+    """
+    cmd = [bin_path]
+
+    if "deskflow-core" in bin_path.lower():
+        # Sintaxe do Deskflow 1.24+
+        cmd.extend(["client", "-f", "--name", client_name, server_address])
+    else:
+        # Sintaxe do Barrier v2.4 (Estável)
+        cmd.extend(["--no-daemon", "--name", client_name, server_address])
+
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def probe_kvm_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
