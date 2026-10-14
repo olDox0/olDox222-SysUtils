@@ -1,6 +1,7 @@
 # leap_sys/cli/cmd_leap.py
 """
 Interface CLI para Gerenciamento de KVM (Barrier / Deskflow / Input Leap).
+Suporte a telemetria em tempo real, auditoria de socket TCP e logging estruturado.
 """
 from __future__ import annotations
 import os
@@ -13,7 +14,7 @@ import psutil
 import shutil
 from pathlib import Path
 import winreg
-from typing import Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List
 
 from leap_sys.leap_engine import (
     leap_installer,
@@ -23,6 +24,8 @@ from leap_sys.leap_engine import (
 )
 from leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOG_DIR = PROJECT_ROOT / "data" / "leap_logs"
 
 def _get_installed_paths_from_registry() -> List[Path]:
     """Varre as chaves de Uninstall do Registro do Windows para achar pastas do Barrier/Deskflow."""
@@ -63,16 +66,25 @@ def _get_installed_paths_from_registry() -> List[Path]:
     return found_dirs
 
 
+def probe_kvm_socket(host: str, port: int = 24800, timeout: float = 1.5) -> Tuple[bool, float]:
+    """Testa a conectividade da porta 24800 e mede a latência em milissegundos."""
+    start_time = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            return True, latency_ms
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False, 0.0
+
 def find_kvm_binary(role: str = "server") -> Optional[str]:
     """
-    Localiza o executável KVM priorizando o Barrier v2.4 (mais estável e leve).
+    Localiza o binário KVM com prioridade absoluta para a versão Barrier portátil.
     """
     target_barrier = "barriers.exe" if role == "server" else "barrierc.exe"
     target_deskflow = "deskflow-core.exe"
 
-    # 1. PRIORIDADE MÁXIMA: Binários do Barrier portáteis no próprio repositório SysUtils
-    project_root = Path(__file__).resolve().parents[2]
-    local_bin = project_root / "bin" / "input-leap" / target_barrier
+    # 1. PRIORIDADE MÁXIMA: Binários portáteis no próprio repositório
+    local_bin = PROJECT_ROOT / "bin" / "input-leap" / target_barrier
     if local_bin.exists():
         return str(local_bin)
 
@@ -91,12 +103,12 @@ def find_kvm_binary(role: str = "server") -> Optional[str]:
         if candidate.exists():
             return str(candidate)
 
-    # 3. TERCEIRA PRIORIDADE: Barrier no PATH do sistema
+    # 3. TERCEIRA PRIORIDADE: Barrier no PATH
     in_path_barrier = shutil.which(target_barrier)
     if in_path_barrier:
         return in_path_barrier
 
-    # 4. FALLBACK: Deskflow (se o Barrier não existir no sistema)
+    # 4. FALLBACK: Deskflow (se Barrier não estiver instalado)
     deskflow_dirs = [
         Path(prog_files) / "Deskflow",
         Path(prog_files_x86) / "Deskflow",
@@ -254,39 +266,40 @@ def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
         click.secho(f"[FALHA] {log}", fg="red")
 
 @cli.command("join")
-@click.argument("server_target", required=False)
-@click.option("--name", default=None, help="Nome de tela registrado no servidor (ex: bluebaby).")
-@click.option("--port", default=24800, show_default=True, help="Porta do servidor.")
-def cmd_join(server_target: str | None, name: str | None, port: int):
-    """Conecta este PC como CLIENTE (receberá os comandos de mouse/teclado)."""
-    if not leap_installer.is_installed():
-        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
-        ok, msg = leap_installer.ensure_binaries()
-        if not ok:
-            click.secho(f"[ERRO] {msg}", fg="red")
-            raise click.Abort()
+@click.argument("server", required=False)
+@click.option("--name", default="bluebaby", help="Nome de tela deste cliente.")
+@click.option("--port", default=24800, help="Porta do servidor KVM.")
+def cmd_join(server, name, port):
+    """Conecta este PC como CLIENTE ao Servidor KVM."""
+    if not server:
+        click.secho("[ERRO] Informe o IP do Servidor (ex: 100.113.157.27).", fg="red", bold=True)
+        return
 
-    client_host = name or "bluebaby"
+    client_bin = find_kvm_binary("client")
+    if not client_bin:
+        click.secho("[ERRO] Nenhum executável de cliente (barrierc.exe) localizado.", fg="red", bold=True)
+        return
 
-    if not server_target:
-        click.secho("[ERRO] IP do servidor (Amaranth) é obrigatório para execução em background.", fg="red", bold=True)
-        click.secho("Uso correto: sysutils leap join 192.168.18.52 --name bluebaby", fg="yellow")
-        raise click.Abort()
+    server_address = f"{server}:{port}"
+    click.echo(f"  • Binário Resolvido : {click.style(client_bin, fg='cyan')}")
+    click.echo(f"  • Servidor Destino  : {click.style(server_address, bold=True, fg='yellow')}")
+    click.echo(f"  • Nome de Tela      : {click.style(name, bold=True, fg='green')}")
 
-    click.secho(f"[*] Conectando com nome de tela [{click.style(client_host, bold=True)}] ao servidor {server_target}:{port}...", fg="cyan")
-    success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
-    if success:
-        click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
-        _update_leap_state(
-          active=True, 
-          mode="client", 
-          target=server_target, 
-          server_ip=server_target, 
-          port=port
-        )
+    click.echo("\n[*] Conectando ao servidor KVM...")
+    result = execute_kvm_client(client_bin, server_address, client_name=name)
+
+    if result["success"]:
+        click.secho(f"\n[SUCESSO] Cliente KVM ativo em segundo plano! (PID: {result['pid']})", fg="green", bold=True)
+        click.echo(f"  • Log de Telemetria : {result['log_path']}")
+        click.secho("👉 Mova o mouse da Amaranth além da borda direita para controlar esta tela!\n", fg="yellow")
     else:
-        click.secho(f"[FALHA] {log}", fg="red", bold=True)
-        click.secho("💡 Dica: Verifique se o Firewall do Windows no Servidor permite a porta 24800.", fg="yellow")
+        click.secho(f"\n[FALHA] O cliente KVM encerrou prematuramente (Código: {result['exit_code']}).", fg="red", bold=True)
+        click.echo(f"  • Log detalhado gravado em: {result['log_path']}\n")
+        click.secho("--- ÚLTIMAS LINHAS DO LOG DO CLIENTE ---", fg="red")
+        lines = result["output"].splitlines()
+        for line in lines[-12:]:
+            click.echo(f"  {line}")
+        click.secho("----------------------------------------\n", fg="red")
 
 @cli.command("status")
 def cmd_status():
@@ -354,19 +367,73 @@ def _update_leap_state(active: bool, mode: str = "idle", target: str = "", serve
     }
     state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-def build_client_command(bin_path: str, server_ip: str, port: int = 24800, client_name: str = "bluebaby") -> list[str]:
-    """Monta a linha de comando compatível com Deskflow moderno e Barrier/InputLeap."""
+def build_client_command(bin_path: str, server_address: str, client_name: str = "bluebaby") -> List[str]:
+    """Monta a linha de comando exata de acordo com o binário selecionado."""
     cmd = [bin_path]
-
-    # Se o executável for o deskflow-core unificado, o primeiro argumento TEM que ser 'client'
     if "deskflow-core" in bin_path.lower():
-        cmd.append("client")
-        cmd.extend(["-f", "--name", client_name, f"{server_ip}:{port}"])
+        # Deskflow 1.24+ exige 'client' como primeiro argumento posicional
+        cmd.extend(["client", "-f", "--name", client_name, server_address])
     else:
-        # Padrão legado (barrierc / inputleapc)
-        cmd.extend(["--no-daemon", "--name", client_name, f"{server_ip}:{port}"])
-
+        # Barrier v2.4 (Estável)
+        cmd.extend(["--no-daemon", "--name", client_name, server_address])
     return cmd
+
+def execute_kvm_client(bin_path: str, server_address: str, client_name: str = "bluebaby") -> Dict:
+    """Executa o cliente KVM com captura forense de logs e monitoramento."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = LOG_DIR / f"client_{timestamp}.log"
+
+    cmd = build_client_command(bin_path, server_address, client_name)
+    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+
+    header = (
+        f"=====================================================\n"
+        f"SYSUTILS KVM CLIENT TELEMETRY LOG\n"
+        f"Data/Hora : {datetime.now().isoformat()}\n"
+        f"Binário   : {bin_path}\n"
+        f"Alvo      : {server_address}\n"
+        f"Tela      : {client_name}\n"
+        f"Comando   : {cmd_str}\n"
+        f"=====================================================\n\n"
+    )
+    log_file.write_text(header, encoding="utf-8")
+
+    try:
+        # Redireciona stdout e stderr para o arquivo de log persistente
+        with open(log_file, "a", encoding="utf-8", errors="replace") as f_log:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=f_log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+
+        # Aguarda brevemente para checar se o processo continuou ativo
+        time.sleep(1.2)
+        exit_code = proc.poll()
+
+        is_running = exit_code is None
+        log_content = log_file.read_text(encoding="utf-8", errors="replace")
+
+        return {
+            "success": is_running,
+            "pid": proc.pid if is_running else None,
+            "exit_code": exit_code,
+            "log_path": str(log_file),
+            "cmd_str": cmd_str,
+            "output": log_content,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "pid": None,
+            "exit_code": -1,
+            "log_path": str(log_file),
+            "cmd_str": cmd_str,
+            "output": f"Falha catastrófica ao iniciar subprocesso: {e}",
+        }
 
 def _probe_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
     """Testa se o servidor KVM está aceitando conexões na porta."""
@@ -380,7 +447,7 @@ def _probe_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
 @cli.command("auto")
 @click.pass_context
 def leap_auto(ctx):
-    """🧙 Assistente Inteligente KVM: Conecta Amaranth e Bluebaby automaticamente."""
+    """🧙 Assistente Inteligente KVM: Conecta Amaranth e Bluebaby com telemetria."""
     hostname = socket.gethostname().lower()
     is_amaranth = "amaranth" in hostname
 
@@ -388,85 +455,55 @@ def leap_auto(ctx):
     click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO COMPARTILHADOS", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
-    # ═══════════════════════════════════════════════════════════
-    # ESTAÇÃO 1: AMARANTH (SERVIDOR / HOST)
-    # ═══════════════════════════════════════════════════════════
+    # 1. ESTAÇÃO AMARANTH (SERVIDOR / HOST)
     if is_amaranth:
         click.echo(f"  • Papel Detectado : {click.style('SERVIDOR MASTER (Amaranth)', bold=True, fg='green')}")
         click.echo("  • Função          : Compartilhar mouse e teclado físicos com a Bluebaby.")
 
         bin_server = find_kvm_binary("server")
         if not bin_server:
-            click.secho("\n[ERRO] Nenhum binário de Servidor (barriers.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
-            click.echo("👉 Execute: sysutils leap setup")
+            click.secho("\n[ERRO] Nenhum binário de Servidor (barriers.exe) localizado.", fg="red", bold=True)
             raise SystemExit(1)
 
         click.echo(f"  • Motor KVM       : {click.style(bin_server, fg='cyan')}")
         click.echo("\n[*] Iniciando servidor KVM na porta 24800...")
 
-        # Invocação segura via dicionário de comandos do Click (elimina NameError)
         host_cmd = cli.commands.get("host")
         if host_cmd:
             ctx.invoke(host_cmd, client="bluebaby", port=24800)
-        else:
-            click.secho("[ERRO] Subcomando 'host' não registrado no grupo CLI.", fg="red")
         return
 
-    # ═══════════════════════════════════════════════════════════
-    # ESTAÇÃO 2: BLUEBABY (CLIENTE / JOIN)
-    # ═══════════════════════════════════════════════════════════
+    # 2. ESTAÇÃO BLUEBABY (CLIENTE / RECEPTOR)
     click.echo(f"  • Papel Detectado : {click.style('CLIENTE RECEPTOR (Bluebaby)', bold=True, fg='yellow')}")
     click.echo("  • Função          : Receber comandos de mouse e teclado da Amaranth.")
 
     bin_client = find_kvm_binary("client")
     if not bin_client:
-        click.secho("\n[ERRO] Nenhum binário de Cliente (barrierc.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
-        click.echo("👉 Execute: sysutils leap setup")
+        click.secho("\n[ERRO] Nenhum binário de Cliente (barrierc.exe) localizado.", fg="red", bold=True)
         raise SystemExit(1)
 
     click.echo(f"  • Motor KVM       : {click.style(bin_client, fg='cyan')}")
 
-    # Prioriza o IP estável do Tailscale, depois IP local
     candidate_ips = ["100.113.157.27", "192.168.18.52"]
     server_ip = None
 
-    click.echo("\n[*] Buscando Servidor Amaranth ativo na porta 24800...")
+    click.echo("\n[*] Auditando porta 24800 no Servidor Amaranth...")
     for ip in candidate_ips:
         click.echo(f"    • Testando {ip}:24800...", nl=False)
-        if probe_kvm_port(ip, port=24800, timeout=1.5):
-            click.secho(" [RESPONDENDO!]", fg="green", bold=True)
+        alive, latency = probe_kvm_socket(ip, port=24800, timeout=1.5)
+        if alive:
+            click.secho(f" [RESPONDENDO! Latência: {latency:.1f}ms]", fg="green", bold=True)
             server_ip = ip
             break
         else:
             click.secho(" [fechada]", fg="yellow")
 
     if not server_ip:
-        click.secho("\n[AVISO] Amaranth não respondeu nas portas habituais.", fg="yellow")
-        click.echo("👉 Certifique-se de que rodou 'sysutils leap auto' na Amaranth primeiro.")
+        click.secho("\n[AVISO] Amaranth não respondeu na porta 24800.", fg="yellow")
         server_ip = click.prompt("Digite o IP do servidor manualmente", default="100.113.157.27")
 
-    click.secho(f"\n[*] Conectando Bluebaby ao Servidor em {server_ip}:24800...", fg="cyan")
-
+    # Invocação unificada e segura do comando join
     join_cmd = cli.commands.get("join")
     if join_cmd:
-        # Auto-inspeção: descobre o nome exato do parâmetro (server, host, address, etc.)
-        kwargs = {}
-        for p in join_cmd.params:
-            if p.name in ("server", "host", "address", "ip", "server_address", "server_ip"):
-                kwargs[p.name] = server_ip
-            elif p.name == "name":
-                kwargs["name"] = "bluebaby"
-            elif p.name == "port":
-                kwargs["port"] = 24800
-
-        # Fallback: se nenhum nome conhecido bater, injeta no primeiro Argument posicional
-        if not any(k in kwargs for k in ("server", "host", "address", "ip", "server_address", "server_ip")):
-            for p in join_cmd.params:
-                if isinstance(p, click.Argument):
-                    kwargs[p.name] = server_ip
-                    break
-
-        ctx.invoke(join_cmd, **kwargs)
-    else:
-        click.secho("[ERRO] Subcomando 'join' não registrado no grupo CLI.", fg="red")
+        ctx.invoke(join_cmd, server=server_ip, name="bluebaby", port=24800)
 
