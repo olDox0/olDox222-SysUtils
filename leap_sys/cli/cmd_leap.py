@@ -1,11 +1,10 @@
 # leap_sys/cli/cmd_leap.py
 """
-Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
-Suporta auto-instalação do Visual C++ Redistributable v14.50+, Deskflow e Doxly.
+Interface CLI para o LeapSys KVM (Baseado no Barrier v2.4.0 / Protocolo 1.6).
+Prioriza o ecossistema Barrier: auto-elevação UAC, setup silencioso e Doxly.
 """
 from __future__ import annotations
 
-import configparser
 import ctypes
 import json
 import os
@@ -24,17 +23,14 @@ from syncdiag.core import network_connect
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOWNLOADS_DIR = PROJECT_ROOT / "data" / "downloads"
 STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
-CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
-SERVER_CONF_PATH = Path.home() / ".doxoade" / "deskflow_server.conf"
-DESKFLOW_TLS_CERT = Path(r"C:\ProgramData\Deskflow\tls\deskflow.pem")
+SERVER_CONF_PATH = Path.home() / ".doxoade" / "barrier_server.conf"
 
-# URLs Oficiais Microsoft e Deskflow
-VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-DESKFLOW_MSI_URL = "https://github.com/deskflow/deskflow/releases/download/v1.26.0/deskflow-1.26.0-win-x64.msi"
+# Instalador Oficial InnoSetup do Barrier v2.4.0 (Instalação 100% silenciosa sem checagens de MSI)
+BARRIER_INSTALLER_URL = "https://github.com/debauchee/barrier/releases/download/v2.4.0/BarrierSetup-2.4.0-release.exe"
 
 
 # ═══════════════════════════════════════════════════════════════
-# AUTO-ELEVAÇÃO UAC E FIREWALL
+# AUTO-ELEVAÇÃO UAC E REGRAS DE FIREWALL
 # ═══════════════════════════════════════════════════════════════
 def is_admin() -> bool:
     try:
@@ -59,36 +55,11 @@ def request_elevation():
 
 def open_firewall_rules():
     rules = [
-        'netsh advfirewall firewall add rule name="Deskflow KVM In 24800" dir=in action=allow protocol=TCP localport=24800 profile=any',
-        'netsh advfirewall firewall add rule name="Deskflow KVM Out 24800" dir=out action=allow protocol=TCP localport=24800 profile=any',
+        'netsh advfirewall firewall add rule name="Barrier KVM In 24800" dir=in action=allow protocol=TCP localport=24800 profile=any',
+        'netsh advfirewall firewall add rule name="Barrier KVM Out 24800" dir=out action=allow protocol=TCP localport=24800 profile=any',
     ]
     for r in rules:
         subprocess.run(r, capture_output=True, shell=True)
-
-
-def ensure_deskflow_tls_cert():
-    r"""Garante a existência do certificado base em C:\ProgramData\Deskflow\tls\deskflow.pem."""
-    if DESKFLOW_TLS_CERT.exists():
-        return
-
-    DESKFLOW_TLS_CERT.parent.mkdir(parents=True, exist_ok=True)
-    openssl_bin = shutil.which("openssl")
-    if not openssl_bin:
-        for candidate in [
-            r"C:\Program Files\Git\usr\bin\openssl.exe",
-            r"C:\winlibs\mingw64\bin\openssl.exe",
-        ]:
-            if Path(candidate).exists():
-                openssl_bin = candidate
-                break
-
-    if openssl_bin:
-        cmd = [
-            openssl_bin, "req", "-x509", "-nodes", "-days", "3650",
-            "-subj", "//CN=Deskflow", "-newkey", "rsa:2048",
-            "-keyout", str(DESKFLOW_TLS_CERT), "-out", str(DESKFLOW_TLS_CERT)
-        ]
-        subprocess.run(cmd, capture_output=True, shell=False)
 
 
 def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, port: int = 24800):
@@ -114,73 +85,43 @@ def get_running_kvm_process() -> Optional[str]:
         text=True,
         errors="replace",
     )
-    for target in ["deskflow-core.exe", "deskflow-server.exe", "barriers.exe", "input-leaps.exe"]:
+    for target in ["barriers.exe", "input-leaps.exe", "deskflow-core.exe", "deskflow-server.exe"]:
         if target.lower() in proc.stdout.lower():
             return target
     return None
 
 
-def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
-    CLIENT_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
-    content = (
-        f"[client]\n"
-        f"remoteHost={server_ip}\n"
-        f"port={port}\n\n"
-        f"[security]\n"
-        f"tlsEnabled=false\n"
-        f"checkPeerFingerprints=false\n"
-    )
-    CLIENT_CONF_PATH.write_text(content, encoding="utf-8")
-
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        try:
-            user_conf = Path(appdata) / "Deskflow" / "Deskflow.conf"
-            user_conf.parent.mkdir(parents=True, exist_ok=True)
-            cfg = configparser.ConfigParser()
-            if user_conf.exists():
-                cfg.read(str(user_conf), encoding="utf-8")
-            if not cfg.has_section("client"):
-                cfg.add_section("client")
-            if not cfg.has_section("security"):
-                cfg.add_section("security")
-            cfg.set("client", "remoteHost", server_ip)
-            cfg.set("client", "port", str(port))
-            cfg.set("security", "tlsEnabled", "false")
-            cfg.set("security", "checkPeerFingerprints", "false")
-            with open(user_conf, "w", encoding="utf-8") as f:
-                cfg.write(f)
-        except Exception:
-            pass
-
-    return CLIENT_CONF_PATH
-
-
 def find_leap_binary(role: str = "any") -> Optional[str]:
+    """Busca com prioridade no Barrier (Server e Client)."""
     names_to_check = []
-    if role in ("client", "any"):
-        names_to_check.extend(["deskflow-core", "deskflow-client", "input-leapc", "barrierc"])
     if role in ("server", "any"):
-        names_to_check.extend(["deskflow-core", "deskflow-server", "input-leaps", "barriers"])
+        names_to_check.extend(["barriers", "input-leaps", "deskflow-core", "deskflow-server"])
+    if role in ("client", "any"):
+        names_to_check.extend(["barrierc", "input-leapc", "deskflow-core", "deskflow-client"])
 
+    # 1. Se o processo já estiver em execução, recupera o caminho direto do processo Windows
+    for name in names_to_check:
+        clean_name = name.replace(".exe", "")
+        cmd = f'powershell -NoProfile -Command "(Get-Process -Name \'{clean_name}\' -ErrorAction SilentlyContinue).Path"'
+        p = subprocess.run(cmd, capture_output=True, text=True, shell=True)
+        for line in p.stdout.strip().splitlines():
+            line = line.strip()
+            if line and Path(line).exists():
+                return line
+
+    # 2. Checa no PATH
     for name in names_to_check:
         found = shutil.which(name)
         if found:
             return found
 
-    for name in names_to_check:
-        cmd = f'powershell -NoProfile -Command "(Get-Process -Name \'{name}\' -ErrorAction SilentlyContinue).Path"'
-        p = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        out = p.stdout.strip().splitlines()
-        if out and out[0] and Path(out[0]).exists():
-            return out[0]
-
+    # 3. Pastas Padrões do Windows
     roots = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
         Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
         Path(os.environ.get("LocalAppData", "")) / "Programs",
     ]
-    subdirs = ["Deskflow", "Input Leap", "Barrier", "Synergy"]
+    subdirs = ["Barrier", "Input Leap", "Deskflow", "Synergy"]
     for root in roots:
         for sdir in subdirs:
             base = root / sdir
@@ -219,91 +160,82 @@ def download_with_progress(url: str, dest_file: Path, label: str) -> bool:
 # ═══════════════════════════════════════════════════════════════
 @click.group()
 def cli():
-    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
+    """LeapSys — Compartilhamento de Mouse & Teclado (Focado em Barrier v2.4.0)."""
     pass
 
 
 @cli.command("setup")
-@click.option("--force", is_flag=True, help="Força a reinstalação.")
+@click.option("--force", is_flag=True, help="Força novo download e instalação do Barrier.")
 def leap_setup(force):
-    """Instala dependências do Visual C++ e o Deskflow oficial sob Administrador."""
+    """Instalação oficial e silenciosa do Barrier v2.4.0 (InnoSetup)."""
     request_elevation()
 
     click.secho("\n" + "=" * 65, fg="cyan")
-    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALAÇÃO AUTOMÁTICA COMPLETA", fg="cyan", bold=True)
+    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALADOR OFICIAL DO BARRIER v2.4", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
     hostname = socket.gethostname()
     click.echo(f"  • Estação Atual : {click.style(hostname, bold=True, fg='green')}")
 
-    # 1. PASSO CRÍTICO: Instalação do Visual C++ Redistributable v14.50+ (Pré-requisito do Deskflow)
-    vcredist_exe = DOWNLOADS_DIR / "vc_redist.x64.exe"
-    click.echo("\n[1/3] Verificando Microsoft Visual C++ Redistributable (v14.50+)...")
-    if not vcredist_exe.exists() or force:
-        success = download_with_progress(VCREDIST_URL, vcredist_exe, "[*] Baixando Visual C++ Redistributable")
-        if not success:
-            click.secho("[ERRO] Falha ao baixar o Visual C++ da Microsoft.", fg="red")
-            raise SystemExit(1)
+    barrier_bin = find_leap_binary(role="any")
+    is_barrier = barrier_bin and "barrier" in barrier_bin.lower()
+
+    if is_barrier and not force:
+        click.secho(f"\n✔ Barrier já detectado e pronto: {barrier_bin}", fg="green", bold=True)
     else:
-        click.echo("  ✔ Instalador do Visual C++ em cache.")
+        installer_path = DOWNLOADS_DIR / "BarrierSetup-2.4.0-release.exe"
 
-    click.echo("[*] Instalando bibliotecas do Visual C++ no Windows...")
-    vc_cmd = [str(vcredist_exe), "/install", "/passive", "/norestart"]
-    subprocess.run(vc_cmd, capture_output=True)
-    click.secho("  ✔ Microsoft Visual C++ v14.50+ instalado com sucesso!", fg="green")
+        if not installer_path.exists() or force:
+            click.echo("\n[*] Baixando Barrier v2.4.0 oficial do GitHub...")
+            success = download_with_progress(BARRIER_INSTALLER_URL, installer_path, "[*] Baixando BarrierSetup.exe")
+            if not success:
+                click.secho("[ERRO] Falha ao baixar o Barrier.", fg="red")
+                raise SystemExit(1)
+        else:
+            click.echo(f"\n✔ Instalador em cache: {installer_path.name}")
 
-    # 2. Instalação do Deskflow
-    click.echo("\n[2/3] Instalando Deskflow v1.26.0 (Protocolo 1.8)...")
-    msi_path = DOWNLOADS_DIR / "deskflow-1.26.0-win-x64.msi"
-    if not msi_path.exists() or force:
-        success = download_with_progress(DESKFLOW_MSI_URL, msi_path, "[*] Baixando Deskflow (.msi)")
-        if not success:
-            click.secho("[ERRO] Falha ao baixar o Deskflow.", fg="red")
-            raise SystemExit(1)
-    else:
-        click.echo("  ✔ Instalador do Deskflow em cache.")
+        click.echo("[*] Instalando Barrier silenciosamente no Windows (InnoSetup)...")
+        # InnoSetup instala em silêncio absoluto com /VERYSILENT e não pede Visual C++ extra
+        install_cmd = [str(installer_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+        subprocess.run(install_cmd, capture_output=True)
 
-    # Executa o MSI via PowerShell com RunAs para garantir permissão total
-    ps_install = f'Start-Process msiexec.exe -ArgumentList \'/i "{msi_path}" /qb /norestart\' -Verb RunAs -Wait'
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps_install], capture_output=True)
+        time.sleep(2)
+        installed = find_leap_binary(role="any")
+        if installed:
+            click.secho(f"  ✔ Barrier instalado com sucesso em: {installed}", fg="green", bold=True)
+        else:
+            click.secho("  [AVISO] Verifique a pasta C:\\Program Files\\Barrier.", fg="yellow")
 
-    time.sleep(2)
-    installed_bin = find_leap_binary(role="any")
-    if installed_bin:
-        click.secho(f"  ✔ Deskflow instalado em: {installed_bin}", fg="green", bold=True)
-    else:
-        click.secho("  [AVISO] Se uma janela do instalador estiver aberta, clique para concluir.", fg="yellow")
-
-    # 3. Configurações de Rede e Certificado
-    click.echo("\n[3/3] Liberando porta TCP 24800 e gerando certificados...")
+    # Liberação do Firewall
+    click.echo("\n[*] Liberando porta TCP 24800 (Entrada e Saída) no Windows Firewall...")
     open_firewall_rules()
-    ensure_deskflow_tls_cert()
-    click.secho("  ✔ Firewall e certificados configurados!", fg="green")
+    click.secho("  ✔ Porta 24800 100% liberada no Firewall!", fg="green")
 
-    click.secho("\n[SUCESSO] Todos os pré-requisitos e o Deskflow estão instalados!", fg="green", bold=True)
-    click.echo("👉 Agora execute 'sysutils leap auto' para iniciar o KVM.")
+    click.secho("\n[SUCESSO] Barrier configurado e pronto para uso!", fg="green", bold=True)
+    click.echo("👉 Agora execute 'sysutils leap auto' nesta máquina.")
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
 
 
 @cli.command("auto")
 def leap_auto():
-    """🧙 Assistente Inteligente: Auto-elevação, compatibilidade TLS e conexão direta."""
+    """🧙 Assistente Inteligente: Auto-elevação e conexão nativa via Barrier."""
     request_elevation()
 
     click.secho("\n" + "=" * 65, fg="cyan")
-    click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO INTELIGENTE", fg="cyan", bold=True)
+    click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO VIA BARRIER", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
     hostname = socket.gethostname().lower()
     is_server = "amaranth" in hostname
 
     if is_server:
+        # ═══ AMARANTH (SERVIDOR MASTER - BARRIER) ═══
         click.secho("  • Papel Detectado: SERVIDOR MASTER (Amaranth)", fg="green", bold=True)
         click.echo("  • Compartilhando teclado e mouse com: bluebaby\n")
 
         running = get_running_kvm_process()
-        if running and "deskflow" in running.lower():
-            click.secho(f"  ✔ Servidor KVM Deskflow já está em execução ({running})!", fg="green", bold=True)
+        if running and "barrier" in running.lower():
+            click.secho(f"  ✔ Servidor Barrier já está ativo em execução ({running})!", fg="green", bold=True)
             update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
             click.echo("👉 Aguardando movimentação do mouse para a Bluebaby.")
             click.secho("\n" + "=" * 65 + "\n", fg="cyan")
@@ -311,42 +243,38 @@ def leap_auto():
 
         bin_path = find_leap_binary(role="server")
         if not bin_path:
-            click.secho("[ERRO] Binário de Servidor não encontrado.", fg="red", bold=True)
-            click.echo("💡 Execute 'sysutils leap setup' para instalar o Visual C++ e o Deskflow.")
+            click.secho("[ERRO] Binário do Barrier Server (barriers.exe) não encontrado.", fg="red", bold=True)
+            click.echo("Execute 'sysutils leap setup' para instalar.")
             raise SystemExit(1)
 
         click.echo(f"  • Binário Servidor: {click.style(Path(bin_path).name, fg='green')}")
         open_firewall_rules()
 
-        config_path = Path.home() / ".doxoade" / "deskflow_server.conf"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Configuração da topologia Amaranth -> Bluebaby
+        SERVER_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
         config_content = (
             "section: screens\n  Amaranth:\n  bluebaby:\nend\n"
             "section: links\n  Amaranth:\n    right = bluebaby\n"
             "  bluebaby:\n    left = Amaranth\nend\n"
         )
-        config_path.write_text(config_content, encoding="utf-8")
+        SERVER_CONF_PATH.write_text(config_content, encoding="utf-8")
 
-        bin_name = Path(bin_path).name.lower()
-        if "deskflow-core" in bin_name:
-            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800"]
-        else:
-            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800"]
-
-        click.echo(f"[*] Disparando Servidor KVM...")
+        cmd = [bin_path, "-f", "--no-tray", "--config", str(SERVER_CONF_PATH), "--address", ":24800"]
+        click.echo(f"[*] Disparando Servidor Barrier na porta 24800...")
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
 
         update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
-        click.secho("\n[OK] Servidor ativo e aguardando conexão da Bluebaby!", fg="green", bold=True)
+        click.secho("\n[OK] Servidor Barrier ativo e aguardando a Bluebaby!", fg="green", bold=True)
 
     else:
+        # ═══ BLUEBABY (CLIENTE SECUNDÁRIO - BARRIER) ═══
         click.secho("  • Papel Detectado: CLIENTE SECUNDÁRIO (Bluebaby)", fg="yellow", bold=True)
         click.echo("  • Localizando servidor Amaranth...\n")
 
         bin_path = find_leap_binary(role="client")
         if not bin_path:
             click.secho("[ERRO] Binário de Cliente não encontrado.", fg="red", bold=True)
-            click.echo("💡 Execute 'sysutils leap setup' para instalar o Visual C++ e o Deskflow.")
+            click.echo("💡 Execute 'sysutils leap setup' nesta máquina para instalar o Barrier.")
             raise SystemExit(1)
 
         target_ip = None
@@ -368,16 +296,10 @@ def leap_auto():
         click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
         click.echo(f"  • Binário KVM   : {click.style(Path(bin_path).name, fg='green')}")
 
-        ensure_deskflow_tls_cert()
-        conf_file = write_deskflow_client_conf(target_ip, port=24800)
+        # Execução padrão e robusta do Barrier Client
+        cmd = [bin_path, "-f", "--no-tray", "--name", "bluebaby", f"{target_ip}:24800"]
 
-        bin_name = Path(bin_path).name.lower()
-        if "deskflow-core" in bin_name:
-            cmd = [bin_path, "client", "-s", str(conf_file)]
-        else:
-            cmd = [bin_path, "-f", "--name", "bluebaby", f"{target_ip}:24800"]
-
-        click.echo("[*] Conectando ao servidor KVM (Deskflow -> Amaranth)...")
+        click.echo("[*] Conectando ao servidor Barrier (Protocolo 1.6)...")
         subprocess.Popen(cmd)
 
         update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
@@ -389,8 +311,8 @@ def leap_auto():
 
 @cli.command("stop")
 def leap_stop():
-    """Encerra daemons do KVM e sincroniza com o Doxly."""
-    for proc in ["deskflow-core.exe", "deskflow-client.exe", "deskflow-server.exe", "barrierc.exe", "barriers.exe", "input-leapc.exe", "input-leaps.exe"]:
+    """Encerra processos do Barrier/Deskflow e atualiza o Doxly."""
+    for proc in ["barriers.exe", "barrierc.exe", "deskflow-core.exe", "deskflow-server.exe", "input-leaps.exe", "input-leapc.exe"]:
         subprocess.run(f"taskkill /IM {proc} /F", capture_output=True, shell=True)
 
     update_doxly_state(False, "idle", "", "")
