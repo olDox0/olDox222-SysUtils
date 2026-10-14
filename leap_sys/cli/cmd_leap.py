@@ -422,9 +422,26 @@ def leap_auto(ctx):
 
     click.secho(f"\n[*] Conectando Bluebaby ao Servidor em {server_ip}:24800...", fg="cyan")
 
-    # Invocação segura via dicionário de comandos do Click (elimina NameError)
     join_cmd = cli.commands.get("join")
     if join_cmd:
-        ctx.invoke(join_cmd, server_ip=server_ip, name="bluebaby", port=24800)
+        # Auto-inspeção: descobre o nome exato do parâmetro (server, host, address, etc.)
+        kwargs = {}
+        for p in join_cmd.params:
+            if p.name in ("server", "host", "address", "ip", "server_address", "server_ip"):
+                kwargs[p.name] = server_ip
+            elif p.name == "name":
+                kwargs["name"] = "bluebaby"
+            elif p.name == "port":
+                kwargs["port"] = 24800
+
+        # Fallback: se nenhum nome conhecido bater, injeta no primeiro Argument posicional
+        if not any(k in kwargs for k in ("server", "host", "address", "ip", "server_address", "server_ip")):
+            for p in join_cmd.params:
+                if isinstance(p, click.Argument):
+                    kwargs[p.name] = server_ip
+                    break
+
+        ctx.invoke(join_cmd, **kwargs)
     else:
         click.secho("[ERRO] Subcomando 'join' não registrado no grupo CLI.", fg="red")
+
