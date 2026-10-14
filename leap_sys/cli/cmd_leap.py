@@ -6,6 +6,7 @@ import click
 import json
 import time
 import psutil
+import subprocess
 from pathlib import Path
 from leap_sys.leap_engine import (
     leap_installer,
@@ -14,6 +15,7 @@ from leap_sys.leap_engine import (
     leap_discovery
 )
 from leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
+from syncdiag.core import network_connect
 
 @click.group(name="leap")
 def cli():
@@ -200,3 +202,88 @@ def _update_leap_state(active: bool, mode: str = "idle", target: str = "", serve
         "updated_at": time.time()
     }
     state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+def build_leap_command(bin_path: str, mode: str, args: list) -> list:
+    """Garante compatibilidade com Deskflow moderno (deskflow-core) e legados."""
+    cmd = [bin_path]
+    # Se for o binário unificado deskflow-core, injeta obrigatoriamente 'client' ou 'server'
+    if "deskflow-core" in os.path.basename(bin_path).lower():
+        cmd.append(mode)  # 'client' ou 'server'
+    cmd.extend(args)
+    return cmd
+
+@cli.command("auto")
+def leap_auto():
+    """🧙 Assistente Inteligente: Configura e conecta o KVM (Mouse/Teclado) automaticamente."""
+    click.secho("\n" + "=" * 65, fg="cyan")
+    click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO INTELIGENTE", fg="cyan", bold=True)
+    click.secho("=" * 65 + "\n", fg="cyan")
+
+    hostname = socket.gethostname().lower()
+    is_server = "amaranth" in hostname
+
+    if is_server:
+        # ═══ COMPORTAMENTO NA AMARANTH (SERVIDOR) ═══
+        click.secho("  • Papel Detectado: SERVIDOR MASTER (Amaranth)", fg="green", bold=True)
+        click.echo("  • Compartilhando teclado e mouse com: bluebaby\n")
+
+        # 1. Liberação do Firewall
+        click.echo("[*] Verificando regra de Firewall na porta 24800...")
+        subprocess.run(
+            'netsh advfirewall firewall add rule name="Deskflow Leap 24800" dir=in action=allow protocol=TCP localport=24800',
+            capture_output=True,
+            shell=True,
+        )
+
+        # 2. Inicia o servidor com a Bluebaby à direita
+        ctx = click.get_current_context()
+        click.echo("[*] Disparando servidor KVM Deskflow...")
+        try:
+            # Invoca o comando 'host' existente configurando 'bluebaby'
+            ctx.invoke(host, client_name="bluebaby", position="right")
+        except Exception as e:
+            # Fallback direto caso chame via subprocess
+            subprocess.Popen(["sysutils", "leap", "host", "--client", "bluebaby"])
+
+        click.secho("\n✔ Servidor ativo e aguardando conexão da Bluebaby!", fg="green", bold=True)
+
+    else:
+        # ═══ COMPORTAMENTO NA BLUEBABY (CLIENTE) ═══
+        click.secho("  • Papel Detectado: CLIENTE SECUNDÁRIO (Bluebaby)", fg="yellow", bold=True)
+        click.echo("  • Buscando servidor Amaranth na rede...\n")
+
+        # 1. Procura o IP da Amaranth via Tailscale ou IP local padrão
+        target_ip = None
+        peers = network_connect.get_tailscale_peers()
+        for p in peers:
+            if "amaranth" in p["name"].lower():
+                target_ip = p["ip"]
+                break
+
+        # Fallback para IP de LAN conhecido caso Tailscale não esteja em lista
+        if not target_ip:
+            for candidate in ["100.113.157.27", "192.168.18.52"]:
+                if network_connect.probe_smb_port(candidate, port=24800, timeout=1.5):
+                    target_ip = candidate
+                    break
+
+        if not target_ip:
+            target_ip = "100.113.157.27"  # IP fixo do Tailscale da Amaranth
+
+        click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
+
+        # 2. Testa se a porta 24800 está ouvindo
+        click.echo("[*] Testando porta KVM (24800)...")
+        if not network_connect.probe_smb_port(target_ip, port=24800, timeout=2.0):
+            click.secho(f"\n[AVISO] A porta 24800 em {target_ip} não respondeu.", fg="yellow")
+            click.echo("Certifique-se de ter rodado 'sysutils leap auto' primeiro na Amaranth.")
+
+        # 3. Dispara a conexão com nome 'bluebaby'
+        click.echo(f"\n[*] Conectando com tela [bluebaby] em {target_ip}:24800...")
+        ctx = click.get_current_context()
+        try:
+            ctx.invoke(join, server_ip=target_ip, name="bluebaby")
+        except Exception:
+            subprocess.Popen(["sysutils", "leap", "join", target_ip, "--name", "bluebaby"])
+
+    click.secho("\n" + "=" * 65 + "\n", fg="cyan")

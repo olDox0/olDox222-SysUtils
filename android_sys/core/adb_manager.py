@@ -1,10 +1,16 @@
+# -*- coding: utf-8 -*-
 # android_sys/core/adb_manager.py
+"""
+Hermes / Poseidon: Gerenciador de Comunicação ADB e Envio sem Fio (TCP/IP).
+Controla conexões, pareamento mDNS/código e instalação remota de APKs via Wi-Fi.
+Conformidade: ProDeNov 2.1 e 3.1.4.
+"""
 from __future__ import annotations
 import json
 import socket
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from android_sys.core.installer import get_binary_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -18,8 +24,10 @@ def save_last_ip(ip: str):
 
 def load_config() -> dict:
     if CONFIG_FILE.exists():
-        try: return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except: pass
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     return {}
 
 def run_adb(args: List[str]) -> subprocess.CompletedProcess:
@@ -27,7 +35,8 @@ def run_adb(args: List[str]) -> subprocess.CompletedProcess:
     cmd = [str(adb_bin)] + args
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-def pair_device(ip_port: str, code: str) -> tuple[bool, str]:
+def pair_device(ip_port: str, code: str) -> Tuple[bool, str]:
+    """Pareia com o celular usando a porta efêmera e o código de 6 dígitos."""
     res = run_adb(["pair", ip_port, code])
     out = res.stdout.strip() or res.stderr.strip()
     success = "successfully paired" in out.lower() or res.returncode == 0
@@ -35,11 +44,12 @@ def pair_device(ip_port: str, code: str) -> tuple[bool, str]:
         save_last_ip(ip_port.split(":")[0])
     return success, out
 
-def connect_device(target: str) -> tuple[bool, str]:
+def connect_device(target: str) -> Tuple[bool, str]:
+    """Conecta ao serviço principal de depuração Wi-Fi do celular."""
     cfg = load_config()
     last_ip = cfg.get("last_ip", "192.168.18.105")
-    
-    # Se o usuário passou apenas a porta de 5 dígitos (ex: '41235')
+
+    # Tratamento de atalhos de porta
     if target.isdigit():
         target = f"{last_ip}:{target}"
     elif target.startswith(":"):
@@ -56,6 +66,7 @@ def connect_device(target: str) -> tuple[bool, str]:
     return success, out
 
 def get_connected_devices() -> List[str]:
+    """Retorna os dispositivos Android conectados e ativos."""
     res = run_adb(["devices"])
     devices = []
     for line in res.stdout.splitlines()[1:]:
@@ -64,14 +75,24 @@ def get_connected_devices() -> List[str]:
             devices.append(parts[0])
     return devices
 
-def scan_and_auto_connect(ip: str | None = None) -> tuple[bool, str]:
+def install_apk(device_target: str, apk_path: Path) -> Tuple[bool, str]:
+    """Envia e instala um arquivo APK diretamente no celular pelo ar (Wi-Fi)."""
+    if not apk_path.exists():
+        return False, f"Arquivo não encontrado: {apk_path}"
+
+    # Executa o adb install com flag -r (reinstall preservando dados)
+    res = run_adb(["-s", device_target, "install", "-r", str(apk_path.resolve())])
+    out = res.stdout.strip() or res.stderr.strip()
+    success = "success" in out.lower()
+    return success, out
+
+def scan_and_auto_connect(ip: str | None = None) -> Tuple[bool, str]:
     """Varre as portas dinâmicas do Android na rede Wi-Fi e conecta sozinho."""
-    target_ip = ip or load_config().get("last_ip")
+    target_ip = ip or load_config().get("last_ip", "192.168.18.105")
     if not target_ip:
         return False, "Nenhum IP registrado. Conecte ao menos uma vez informando IP:porta."
 
     print(f"[*] Varrendo portas ativas no celular ({target_ip})...")
-    # No Android, a depuração sem fio sorteia portas entre 30000 e 47000
     candidate_ports = []
     for port in range(35000, 45001):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -83,7 +104,7 @@ def scan_and_auto_connect(ip: str | None = None) -> tuple[bool, str]:
             break
 
     if not candidate_ports:
-        return False, f"Nenhuma porta de depuração aberta detectada em {target_ip}. A 'Depuração sem fio' está ligada no celular?"
+        return False, f"Nenhuma porta de depuração aberta detectada em {target_ip}."
 
     for p in candidate_ports:
         ok, msg = connect_device(f"{target_ip}:{p}")
