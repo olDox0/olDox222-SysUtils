@@ -1,319 +1,430 @@
 # leap_sys/cli/cmd_leap.py
 """
-Interface CLI para o LeapSys KVM (Baseado no Barrier v2.4.0 / Protocolo 1.6).
-Prioriza o ecossistema Barrier: auto-elevação UAC, setup silencioso e Doxly.
+Interface CLI para Gerenciamento de KVM (Barrier / Deskflow / Input Leap).
 """
 from __future__ import annotations
-
-import ctypes
-import json
 import os
-import shutil
 import socket
-import subprocess
-import sys
-import time
-import urllib.request
-from pathlib import Path
-from typing import Optional
 import click
+import subprocess
+import json
+import time
+import psutil
+import shutil
+from pathlib import Path
+import winreg
+from typing import Optional, Tuple, List
 
-from syncdiag.core import network_connect
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DOWNLOADS_DIR = PROJECT_ROOT / "data" / "downloads"
-STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
-SERVER_CONF_PATH = Path.home() / ".doxoade" / "barrier_server.conf"
-
-# Instalador Oficial InnoSetup do Barrier v2.4.0 (Instalação 100% silenciosa sem checagens de MSI)
-BARRIER_INSTALLER_URL = "https://github.com/debauchee/barrier/releases/download/v2.4.0/BarrierSetup-2.4.0-release.exe"
-
-
-# ═══════════════════════════════════════════════════════════════
-# AUTO-ELEVAÇÃO UAC E REGRAS DE FIREWALL
-# ═══════════════════════════════════════════════════════════════
-def is_admin() -> bool:
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
-        return False
+from leap_sys.leap_engine import (
+    leap_installer,
+    leap_orchestration,
+    leap_daemon,
+    leap_discovery
+)
+from leap_sys.leap_platform.leap_windows import leap_firewall, leap_elevation
 
 
-def request_elevation():
-    if is_admin():
-        return
-    click.secho("\n[*] Privilégios de Administrador necessários para o KVM.", fg="yellow")
-    params = " ".join([f'"{arg}"' if " " in arg else arg for arg in sys.argv])
-    hinstance = ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, params, None, 1
-    )
-    if hinstance > 32:
-        sys.exit(0)
+def _get_installed_paths_from_registry() -> List[Path]:
+    """Varre as chaves de Uninstall do Registro do Windows para achar pastas do Barrier/Deskflow."""
+    found_dirs = []
+    reg_roots = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+
+    for root, subkey in reg_roots:
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                for i in range(count):
+                    try:
+                        app_key_name = winreg.EnumKey(key, i)
+                        with winreg.OpenKey(key, app_key_name) as app_key:
+                            disp_name, _ = winreg.QueryValueEx(app_key, "DisplayName")
+                            if any(tool in disp_name.lower() for tool in ["barrier", "deskflow", "input leap"]):
+                                try:
+                                    install_loc, _ = winreg.QueryValueEx(app_key, "InstallLocation")
+                                    if install_loc:
+                                        found_dirs.append(Path(install_loc))
+                                except OSError:
+                                    pass
+                                try:
+                                    icon_path, _ = winreg.QueryValueEx(app_key, "DisplayIcon")
+                                    if icon_path:
+                                        found_dirs.append(Path(icon_path).parent)
+                                except OSError:
+                                    pass
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+    return found_dirs
+
+
+def find_kvm_binary(role: str = "server") -> Optional[str]:
+    """Localiza qualquer binário KVM ativo (Barrier, Deskflow ou Input Leap)."""
+    target_names = []
+    if role == "server":
+        target_names = ["barriers.exe", "deskflow-core.exe", "inputleaps.exe"]
     else:
-        click.secho("[ERRO] Elevação UAC cancelada pelo usuário.", fg="red")
+        target_names = ["barrierc.exe", "deskflow-core.exe", "inputleapc.exe"]
 
+    # 1. PATH do Sistema
+    for name in target_names:
+        in_path = shutil.which(name)
+        if in_path:
+            return in_path
 
-def open_firewall_rules():
-    rules = [
-        'netsh advfirewall firewall add rule name="Barrier KVM In 24800" dir=in action=allow protocol=TCP localport=24800 profile=any',
-        'netsh advfirewall firewall add rule name="Barrier KVM Out 24800" dir=out action=allow protocol=TCP localport=24800 profile=any',
+    # 2. Varredura via Registro do Windows (Mais confiável)
+    for reg_dir in _get_installed_paths_from_registry():
+        for name in target_names:
+            candidate = reg_dir / name
+            if candidate.exists():
+                return str(candidate)
+
+    # 3. Varredura em pastas clássicas do sistema (x86 e x64)
+    prog_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local_appdata = os.environ.get("LocalAppData", "")
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+
+    search_dirs = [
+        Path(prog_files_x86) / "Barrier",
+        Path(prog_files) / "Barrier",
+        Path(prog_files_x86) / "Deskflow",
+        Path(prog_files) / "Deskflow",
+        Path(prog_files) / "Input Leap",
+        Path(local_appdata) / "Programs" / "Barrier",
+        Path(local_appdata) / "Programs" / "Deskflow",
+        Path(program_data) / "Barrier",
     ]
-    for r in rules:
-        subprocess.run(r, capture_output=True, shell=True)
+
+    for directory in search_dirs:
+        for name in target_names:
+            candidate = directory / name
+            if candidate.exists():
+                return str(candidate)
+
+    return 
 
 
-def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, port: int = 24800):
+def probe_kvm_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
+    """Verifica se a porta KVM está respondendo."""
     try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "active": active,
-            "mode": mode,
-            "target": target,
-            "server_ip": server_ip,
-            "port": port,
-            "updated_at": int(time.time()),
-        }
-        STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def get_running_kvm_process() -> Optional[str]:
-    proc = subprocess.run(
-        ["tasklist", "/FI", "STATUS eq running"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-    )
-    for target in ["barriers.exe", "input-leaps.exe", "deskflow-core.exe", "deskflow-server.exe"]:
-        if target.lower() in proc.stdout.lower():
-            return target
-    return None
-
-
-def find_leap_binary(role: str = "any") -> Optional[str]:
-    """Busca com prioridade no Barrier (Server e Client)."""
-    names_to_check = []
-    if role in ("server", "any"):
-        names_to_check.extend(["barriers", "input-leaps", "deskflow-core", "deskflow-server"])
-    if role in ("client", "any"):
-        names_to_check.extend(["barrierc", "input-leapc", "deskflow-core", "deskflow-client"])
-
-    # 1. Se o processo já estiver em execução, recupera o caminho direto do processo Windows
-    for name in names_to_check:
-        clean_name = name.replace(".exe", "")
-        cmd = f'powershell -NoProfile -Command "(Get-Process -Name \'{clean_name}\' -ErrorAction SilentlyContinue).Path"'
-        p = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        for line in p.stdout.strip().splitlines():
-            line = line.strip()
-            if line and Path(line).exists():
-                return line
-
-    # 2. Checa no PATH
-    for name in names_to_check:
-        found = shutil.which(name)
-        if found:
-            return found
-
-    # 3. Pastas Padrões do Windows
-    roots = [
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
-        Path(os.environ.get("LocalAppData", "")) / "Programs",
-    ]
-    subdirs = ["Barrier", "Input Leap", "Deskflow", "Synergy"]
-    for root in roots:
-        for sdir in subdirs:
-            base = root / sdir
-            if not base.exists():
-                continue
-            for name in names_to_check:
-                cand = base / f"{name}.exe"
-                if cand.exists():
-                    return str(cand)
-
-    return None
-
-
-def download_with_progress(url: str, dest_file: Path, label: str) -> bool:
-    dest_file.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "SysUtils/1.0"})
-    try:
-        with urllib.request.urlopen(req) as resp, open(dest_file, "wb") as out_file:
-            total_size = int(resp.headers.get("Content-Length", 0))
-            block_size = 65536
-            with click.progressbar(length=total_size, label=label) as bar:
-                while True:
-                    chunk = resp.read(block_size)
-                    if not chunk:
-                        break
-                    out_file.write(chunk)
-                    bar.update(len(chunk))
-        return True
-    except Exception as e:
-        click.secho(f"\n[ERRO] Falha no download: {e}", fg="red")
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
         return False
 
-
-# ═══════════════════════════════════════════════════════════════
-# COMANDOS CLI
-# ═══════════════════════════════════════════════════════════════
-@click.group()
+@click.group(name="leap")
 def cli():
-    """LeapSys — Compartilhamento de Mouse & Teclado (Focado em Barrier v2.4.0)."""
+    """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
     pass
 
-
 @cli.command("setup")
-@click.option("--force", is_flag=True, help="Força novo download e instalação do Barrier.")
-def leap_setup(force):
-    """Instalação oficial e silenciosa do Barrier v2.4.0 (InnoSetup)."""
-    request_elevation()
-
+def leap_setup():
+    """Baixa e instala o Barrier v2.4 oficial com elevação UAC garantida."""
     click.secho("\n" + "=" * 65, fg="cyan")
-    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALADOR OFICIAL DO BARRIER v2.4", fg="cyan", bold=True)
+    click.secho(" 📦 SYSUTILS LEAP SETUP — INSTALADOR OFICIAL DO BARRIER", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
-    hostname = socket.gethostname()
-    click.echo(f"  • Estação Atual : {click.style(hostname, bold=True, fg='green')}")
+    installer_url = "https://github.com/debauchee/barrier/releases/download/v2.4.0/BarrierSetup-2.4.0-Release.exe"
+    temp_dir = Path(os.environ.get("TEMP", "C:/Windows/Temp"))
+    installer_path = temp_dir / "BarrierSetup-2.4.0.exe"
 
-    barrier_bin = find_leap_binary(role="any")
-    is_barrier = barrier_bin and "barrier" in barrier_bin.lower()
+    click.echo("[*] Baixando instalador oficial do Barrier...")
+    import urllib.request
+    try:
+        urllib.request.urlretrieve(installer_url, installer_path)
+        click.secho("  ✔ Download concluído com sucesso!", fg="green")
+    except Exception as e:
+        click.secho(f"[ERRO] Falha ao baixar instalador: {e}", fg="red")
+        return
 
-    if is_barrier and not force:
-        click.secho(f"\n✔ Barrier já detectado e pronto: {barrier_bin}", fg="green", bold=True)
+    click.echo("\n[*] Solicitando permissão de Administrador para instalar...")
+    click.echo("👉 Clique em 'SIM' na caixa do Windows que aparecer na tela!")
+
+    # Executa com RunAs no PowerShell para garantir gravação em C:\Program Files
+    ps_cmd = (
+        f"Start-Process -FilePath '{installer_path}' "
+        f"-ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' "
+        f"-Verb RunAs -Wait"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd])
+
+    # Libera porta no Firewall
+    click.echo("\n[*] Liberando porta TCP 24800 no Firewall do Windows...")
+    fw_cmd = (
+        'netsh advfirewall firewall add rule name="Barrier KVM 24800" '
+        'dir=in action=allow protocol=TCP localport=24800'
+    )
+    subprocess.run(["powershell", "-Command", f"Start-Process cmd -ArgumentList '/c {fw_cmd}' -Verb RunAs -Wait"])
+
+    bin_server = find_kvm_binary("server")
+    if bin_server:
+        click.secho(f"\n[SUCESSO] Barrier detectado em: {bin_server}", fg="green", bold=True)
+        click.secho("👉 Agora execute 'sysutils leap auto' nesta máquina!\n", fg="yellow")
     else:
-        installer_path = DOWNLOADS_DIR / "BarrierSetup-2.4.0-release.exe"
+        click.secho("\n[AVISO] Verifique se o instalador concluiu em 'C:\\Program Files\\Barrier'.", fg="yellow")
 
-        if not installer_path.exists() or force:
-            click.echo("\n[*] Baixando Barrier v2.4.0 oficial do GitHub...")
-            success = download_with_progress(BARRIER_INSTALLER_URL, installer_path, "[*] Baixando BarrierSetup.exe")
-            if not success:
-                click.secho("[ERRO] Falha ao baixar o Barrier.", fg="red")
-                raise SystemExit(1)
-        else:
-            click.echo(f"\n✔ Instalador em cache: {installer_path.name}")
 
-        click.echo("[*] Instalando Barrier silenciosamente no Windows (InnoSetup)...")
-        # InnoSetup instala em silêncio absoluto com /VERYSILENT e não pede Visual C++ extra
-        install_cmd = [str(installer_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
-        subprocess.run(install_cmd, capture_output=True)
+@cli.command("host")
+@click.option("--client", default=None, help="Hostname ou apelido do computador cliente (ex: bluebaby).")
+@click.option("--pos", type=click.Choice(["right", "left", "above", "below"]), default="right", show_default=True,
+              help="Posição física do cliente em relação a este servidor.")
+@click.option("--port", default=24800, show_default=True, help="Porta de escuta TCP.")
+@click.option("--no-firewall", is_flag=True, help="Pula verificação de regra no Windows Firewall.")
+def cmd_host(client: str | None, pos: str, port: int, no_firewall: bool):
+    """Inicia este PC como SERVIDOR (onde mouse e teclado estão conectados fisicamente)."""
+    server_host = socket.gethostname()
 
-        time.sleep(2)
-        installed = find_leap_binary(role="any")
-        if installed:
-            click.secho(f"  ✔ Barrier instalado com sucesso em: {installed}", fg="green", bold=True)
-        else:
-            click.secho("  [AVISO] Verifique a pasta C:\\Program Files\\Barrier.", fg="yellow")
+    def _get_local_ips() -> list[tuple[str, str]]:
+        ips = []
+        for iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET and not addr.address.startswith("127."):
+                    ips.append((iface, addr.address))
+        return ips
 
-    # Liberação do Firewall
-    click.echo("\n[*] Liberando porta TCP 24800 (Entrada e Saída) no Windows Firewall...")
-    open_firewall_rules()
-    click.secho("  ✔ Porta 24800 100% liberada no Firewall!", fg="green")
+    if not leap_installer.is_installed():
+        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
+        ok, msg = leap_installer.ensure_binaries()
+        if not ok:
+            click.secho(f"[ERRO] {msg}", fg="red")
+            raise click.Abort()
 
-    click.secho("\n[SUCESSO] Barrier configurado e pronto para uso!", fg="green", bold=True)
-    click.echo("👉 Agora execute 'sysutils leap auto' nesta máquina.")
-    click.secho("\n" + "=" * 65 + "\n", fg="cyan")
+    if not client:
+        click.echo(f"Computador Servidor atual: {click.style(server_host, bold=True, fg='cyan')}")
+        client = click.prompt("Nome do computador cliente de destino (ex: bluebaby)")
+
+    if not no_firewall:
+        if not leap_firewall.is_port_open(port):
+            click.secho(f"[*] Porta {port} fechada no Firewall do Windows. Solicitando liberação...", fg="yellow")
+            if leap_elevation.is_admin():
+                leap_firewall.open_firewall_port(port, "InputLeap_Server")
+                click.secho(f"[OK] Porta {port} liberada no Firewall.", fg="green")
+            else:
+                click.secho("[AVISO] Rode o terminal como Administrador ou use '--no-firewall' se a porta já estiver aberta.", fg="yellow")
+
+    click.secho(f"[*] Montando topologia: [{server_host}] ===({pos.upper()})===> [{client}]", fg="cyan")
+    success, log = leap_orchestration.start_host(server_name=server_host, client_name=client, position=pos, port=port)
+    if success:
+        click.secho(f"\n[OK] Servidor KVM ativo em segundo plano na porta {port}!", fg="green", bold=True)
+        click.echo("\n--- ENDEREÇOS DO SERVIDOR (AMARANTH) ---")
+        for iface, ip in _get_local_ips():
+            click.echo(f"  • {iface:<25} : {click.style(ip, fg='cyan', bold=True)}")
+        click.echo("----------------------------------------")
+        click.echo(f"👉 No outro computador ({client}), execute:")
+        click.secho(f"   sysutils leap join <IP_ESCOLHIDO_ACIMA> --port {port}\n", fg="yellow", bold=True)
+        _update_leap_state(
+          active=True, 
+          mode="host", 
+          target=client, 
+          server_ip="192.168.18.52", 
+          port=port
+        )
+    else:
+        click.secho(f"[FALHA] {log}", fg="red")
+
+@cli.command("join")
+@click.argument("server_target", required=False)
+@click.option("--name", default=None, help="Nome de tela registrado no servidor (ex: bluebaby).")
+@click.option("--port", default=24800, show_default=True, help="Porta do servidor.")
+def cmd_join(server_target: str | None, name: str | None, port: int):
+    """Conecta este PC como CLIENTE (receberá os comandos de mouse/teclado)."""
+    if not leap_installer.is_installed():
+        click.secho("[!] Binários não encontrados. Executando auto-setup...", fg="yellow")
+        ok, msg = leap_installer.ensure_binaries()
+        if not ok:
+            click.secho(f"[ERRO] {msg}", fg="red")
+            raise click.Abort()
+
+    client_host = name or "bluebaby"
+
+    if not server_target:
+        click.secho("[ERRO] IP do servidor (Amaranth) é obrigatório para execução em background.", fg="red", bold=True)
+        click.secho("Uso correto: sysutils leap join 192.168.18.52 --name bluebaby", fg="yellow")
+        raise click.Abort()
+
+    click.secho(f"[*] Conectando com nome de tela [{click.style(client_host, bold=True)}] ao servidor {server_target}:{port}...", fg="cyan")
+    success, log = leap_orchestration.start_client(server_ip=server_target, client_name=client_host, port=port)
+    if success:
+        click.secho(f"[OK] Cliente Input Leap ativo em background com nome '{client_host}'!", fg="green", bold=True)
+        _update_leap_state(
+          active=True, 
+          mode="client", 
+          target=server_target, 
+          server_ip=server_target, 
+          port=port
+        )
+    else:
+        click.secho(f"[FALHA] {log}", fg="red", bold=True)
+        click.secho("💡 Dica: Verifique se o Firewall do Windows no Servidor permite a porta 24800.", fg="yellow")
+
+@cli.command("status")
+def cmd_status():
+    """Verifica se os daemons do Input Leap estão rodando."""
+    status = leap_daemon.get_running_status()
+    click.echo("\n--- STATUS DO LEAP SYS ---")
+    if status["server_running"]:
+        click.secho(f"  ● Servidor: ATIVO (PID: {status['server_pids']})", fg="green", bold=True)
+    else:
+        click.echo("  ○ Servidor: Inativo")
+    if status["client_running"]:
+        click.secho(f"  ● Cliente:  ATIVO (PID: {status['client_pids']})", fg="green", bold=True)
+    else:
+        click.echo("  ○ Cliente:  Inativo")
+    click.echo("--------------------------\n")
+
+@cli.command("stop")
+def cmd_stop():
+    """Encerra todos os processos do Input Leap (Server e Client)."""
+    killed = leap_daemon.stop_all()
+    if killed > 0:
+        _update_leap_state(active=False, mode="idle")
+        click.secho(f"[OK] {killed} processo(s) do Input Leap finalizado(s).", fg="green")
+    else:
+        click.echo("[INFO] Nenhum processo ativo encontrado.")
+
+@cli.command("firewall")
+def cmd_firewall():
+    """Cadastra regras de liberação de porta e executáveis no Firewall do Windows."""
+    if not leap_elevation.is_admin():
+        click.secho("[AVISO] Abra o terminal como Administrador para aplicar as regras no Firewall.", fg="yellow", bold=True)
+    click.secho("[*] Cadastrando regras de liberação no Firewall do Windows...", fg="cyan")
+    ok, logs = leap_firewall.authorize_firewall()
+    for l in logs:
+        click.echo(f"  {l}")
+    if ok:
+        click.secho("[SUCESSO] Firewall do Windows totalmente autorizado para o LeapSys.", fg="green", bold=True)
+
+@cli.command("setup-ux")
+def cmd_setup_ux():
+    """Forja atalho soberano com permissão de Administrador."""
+    click.secho("[*] Forjando Atalho Soberano na Área de Trabalho...", fg="cyan")
+    ok, msg = leap_elevation.create_sovereign_shortcut()
+    if ok:
+        click.secho(f"✔ [SUCESSO] {msg}", fg="green", bold=True)
+        click.secho("💡 Fixe este atalho na sua Barra de Tarefas. O Windows pedirá UAC automaticamente.", fg="yellow")
+        click.secho("   O Leap/KVM funcionará perfeitamente sem travamentos de mouse/teclado.", fg="yellow")
+    else:
+        click.secho(f"❌ [FALHA] {msg}", fg="red", bold=True)
+
+def _update_leap_state(active: bool, mode: str = "idle", target: str = "", server_ip: str = "", port: int = 24800):
+    """Sincroniza o contrato soberano com o Doxly/Lite XL HUD em ~/.doxoade/leap_state.json."""
+    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or ".")
+    dox_dir = home / ".doxoade"
+    dox_dir.mkdir(parents=True, exist_ok=True)
+    state_file = dox_dir / "leap_state.json"
+    
+    data = {
+        "active": active,
+        "mode": mode,
+        "target": target,
+        "server_ip": server_ip,
+        "port": port,
+        "updated_at": time.time()
+    }
+    state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+def build_client_command(bin_path: str, server_ip: str, port: int = 24800, client_name: str = "bluebaby") -> list[str]:
+    """Monta a linha de comando compatível com Deskflow moderno e Barrier/InputLeap."""
+    cmd = [bin_path]
+
+    # Se o executável for o deskflow-core unificado, o primeiro argumento TEM que ser 'client'
+    if "deskflow-core" in bin_path.lower():
+        cmd.append("client")
+        cmd.extend(["-f", "--name", client_name, f"{server_ip}:{port}"])
+    else:
+        # Padrão legado (barrierc / inputleapc)
+        cmd.extend(["--no-daemon", "--name", client_name, f"{server_ip}:{port}"])
+
+    return cmd
+
+def _probe_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
+    """Testa se o servidor KVM está aceitando conexões na porta."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
 
 
 @cli.command("auto")
-def leap_auto():
-    """🧙 Assistente Inteligente: Auto-elevação e conexão nativa via Barrier."""
-    request_elevation()
+@click.pass_context
+def leap_auto(ctx):
+    """🧙 Assistente Inteligente KVM: Conecta Amaranth e Bluebaby automaticamente."""
+    hostname = socket.gethostname().lower()
+    is_amaranth = "amaranth" in hostname
 
     click.secho("\n" + "=" * 65, fg="cyan")
-    click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO VIA BARRIER", fg="cyan", bold=True)
+    click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO COMPARTILHADOS", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
-    hostname = socket.gethostname().lower()
-    is_server = "amaranth" in hostname
+    # ═══════════════════════════════════════════════════════════
+    # ESTAÇÃO 1: AMARANTH (SERVIDOR / HOST)
+    # ═══════════════════════════════════════════════════════════
+    if is_amaranth:
+        click.echo(f"  • Papel Detectado : {click.style('SERVIDOR MASTER (Amaranth)', bold=True, fg='green')}")
+        click.echo("  • Função          : Compartilhar mouse e teclado físicos com a Bluebaby.")
 
-    if is_server:
-        # ═══ AMARANTH (SERVIDOR MASTER - BARRIER) ═══
-        click.secho("  • Papel Detectado: SERVIDOR MASTER (Amaranth)", fg="green", bold=True)
-        click.echo("  • Compartilhando teclado e mouse com: bluebaby\n")
-
-        running = get_running_kvm_process()
-        if running and "barrier" in running.lower():
-            click.secho(f"  ✔ Servidor Barrier já está ativo em execução ({running})!", fg="green", bold=True)
-            update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
-            click.echo("👉 Aguardando movimentação do mouse para a Bluebaby.")
-            click.secho("\n" + "=" * 65 + "\n", fg="cyan")
-            return
-
-        bin_path = find_leap_binary(role="server")
-        if not bin_path:
-            click.secho("[ERRO] Binário do Barrier Server (barriers.exe) não encontrado.", fg="red", bold=True)
-            click.echo("Execute 'sysutils leap setup' para instalar.")
+        bin_server = find_kvm_binary("server")
+        if not bin_server:
+            click.secho("\n[ERRO] Nenhum binário de Servidor (barriers.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
+            click.echo("👉 Execute: sysutils leap setup")
             raise SystemExit(1)
 
-        click.echo(f"  • Binário Servidor: {click.style(Path(bin_path).name, fg='green')}")
-        open_firewall_rules()
+        click.echo(f"  • Motor KVM       : {click.style(bin_server, fg='cyan')}")
+        click.echo("\n[*] Iniciando servidor KVM na porta 24800...")
 
-        # Configuração da topologia Amaranth -> Bluebaby
-        SERVER_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
-        config_content = (
-            "section: screens\n  Amaranth:\n  bluebaby:\nend\n"
-            "section: links\n  Amaranth:\n    right = bluebaby\n"
-            "  bluebaby:\n    left = Amaranth\nend\n"
-        )
-        SERVER_CONF_PATH.write_text(config_content, encoding="utf-8")
+        # Invocação segura via dicionário de comandos do Click (elimina NameError)
+        host_cmd = cli.commands.get("host")
+        if host_cmd:
+            ctx.invoke(host_cmd, client="bluebaby", port=24800)
+        else:
+            click.secho("[ERRO] Subcomando 'host' não registrado no grupo CLI.", fg="red")
+        return
 
-        cmd = [bin_path, "-f", "--no-tray", "--config", str(SERVER_CONF_PATH), "--address", ":24800"]
-        click.echo(f"[*] Disparando Servidor Barrier na porta 24800...")
-        subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    # ═══════════════════════════════════════════════════════════
+    # ESTAÇÃO 2: BLUEBABY (CLIENTE / JOIN)
+    # ═══════════════════════════════════════════════════════════
+    click.echo(f"  • Papel Detectado : {click.style('CLIENTE RECEPTOR (Bluebaby)', bold=True, fg='yellow')}")
+    click.echo("  • Função          : Receber comandos de mouse e teclado da Amaranth.")
 
-        update_doxly_state(True, "host", "bluebaby", "192.168.18.52", 24800)
-        click.secho("\n[OK] Servidor Barrier ativo e aguardando a Bluebaby!", fg="green", bold=True)
+    bin_client = find_kvm_binary("client")
+    if not bin_client:
+        click.secho("\n[ERRO] Nenhum binário de Cliente (barrierc.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
+        click.echo("👉 Execute: sysutils leap setup")
+        raise SystemExit(1)
 
+    click.echo(f"  • Motor KVM       : {click.style(bin_client, fg='cyan')}")
+
+    # Prioriza o IP estável do Tailscale, depois IP local
+    candidate_ips = ["100.113.157.27", "192.168.18.52"]
+    server_ip = None
+
+    click.echo("\n[*] Buscando Servidor Amaranth ativo na porta 24800...")
+    for ip in candidate_ips:
+        click.echo(f"    • Testando {ip}:24800...", nl=False)
+        if probe_kvm_port(ip, port=24800, timeout=1.5):
+            click.secho(" [RESPONDENDO!]", fg="green", bold=True)
+            server_ip = ip
+            break
+        else:
+            click.secho(" [fechada]", fg="yellow")
+
+    if not server_ip:
+        click.secho("\n[AVISO] Amaranth não respondeu nas portas habituais.", fg="yellow")
+        click.echo("👉 Certifique-se de que rodou 'sysutils leap auto' na Amaranth primeiro.")
+        server_ip = click.prompt("Digite o IP do servidor manualmente", default="100.113.157.27")
+
+    click.secho(f"\n[*] Conectando Bluebaby ao Servidor em {server_ip}:24800...", fg="cyan")
+
+    # Invocação segura via dicionário de comandos do Click (elimina NameError)
+    join_cmd = cli.commands.get("join")
+    if join_cmd:
+        ctx.invoke(join_cmd, server_ip=server_ip, name="bluebaby", port=24800)
     else:
-        # ═══ BLUEBABY (CLIENTE SECUNDÁRIO - BARRIER) ═══
-        click.secho("  • Papel Detectado: CLIENTE SECUNDÁRIO (Bluebaby)", fg="yellow", bold=True)
-        click.echo("  • Localizando servidor Amaranth...\n")
-
-        bin_path = find_leap_binary(role="client")
-        if not bin_path:
-            click.secho("[ERRO] Binário de Cliente não encontrado.", fg="red", bold=True)
-            click.echo("💡 Execute 'sysutils leap setup' nesta máquina para instalar o Barrier.")
-            raise SystemExit(1)
-
-        target_ip = None
-        peers = network_connect.get_tailscale_peers()
-        for p in peers:
-            if "amaranth" in p["name"].lower():
-                target_ip = p["ip"]
-                break
-
-        if not target_ip:
-            for candidate in ["192.168.18.52", "100.113.157.27"]:
-                if network_connect.probe_smb_port(candidate, port=24800, timeout=1.0):
-                    target_ip = candidate
-                    break
-
-        if not target_ip:
-            target_ip = "192.168.18.52"
-
-        click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
-        click.echo(f"  • Binário KVM   : {click.style(Path(bin_path).name, fg='green')}")
-
-        # Execução padrão e robusta do Barrier Client
-        cmd = [bin_path, "-f", "--no-tray", "--name", "bluebaby", f"{target_ip}:24800"]
-
-        click.echo("[*] Conectando ao servidor Barrier (Protocolo 1.6)...")
-        subprocess.Popen(cmd)
-
-        update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
-        click.secho("\n[OK] Cliente conectado com sucesso ao Amaranth!", fg="green", bold=True)
-        click.echo("👉 Mova o mouse da Amaranth para a borda direita para controlar a Bluebaby.")
-
-    click.secho("\n" + "=" * 65 + "\n", fg="cyan")
-
-
-@cli.command("stop")
-def leap_stop():
-    """Encerra processos do Barrier/Deskflow e atualiza o Doxly."""
-    for proc in ["barriers.exe", "barrierc.exe", "deskflow-core.exe", "deskflow-server.exe", "input-leaps.exe", "input-leapc.exe"]:
-        subprocess.run(f"taskkill /IM {proc} /F", capture_output=True, shell=True)
-
-    update_doxly_state(False, "idle", "", "")
-    click.secho("[OK] Processos do KVM encerrados.", fg="green")
+        click.secho("[ERRO] Subcomando 'join' não registrado no grupo CLI.", fg="red")
