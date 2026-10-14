@@ -447,7 +447,7 @@ def _probe_port(host: str, port: int = 24800, timeout: float = 1.5) -> bool:
 @cli.command("auto")
 @click.pass_context
 def leap_auto(ctx):
-    """🧙 Assistente Inteligente KVM: Conecta Amaranth e Bluebaby com telemetria."""
+    """🧙 Assistente Inteligente KVM: Conecta Amaranth e Bluebaby automaticamente."""
     hostname = socket.gethostname().lower()
     is_amaranth = "amaranth" in hostname
 
@@ -455,55 +455,85 @@ def leap_auto(ctx):
     click.secho(" 🖱️  SYSUTILS LEAP AUTO — MOUSE & TECLADO COMPARTILHADOS", fg="cyan", bold=True)
     click.secho("=" * 65 + "\n", fg="cyan")
 
-    # 1. ESTAÇÃO AMARANTH (SERVIDOR / HOST)
+    # ═══════════════════════════════════════════════════════════
+    # ESTAÇÃO 1: AMARANTH (SERVIDOR / HOST)
+    # ═══════════════════════════════════════════════════════════
     if is_amaranth:
         click.echo(f"  • Papel Detectado : {click.style('SERVIDOR MASTER (Amaranth)', bold=True, fg='green')}")
         click.echo("  • Função          : Compartilhar mouse e teclado físicos com a Bluebaby.")
 
         bin_server = find_kvm_binary("server")
         if not bin_server:
-            click.secho("\n[ERRO] Nenhum binário de Servidor (barriers.exe) localizado.", fg="red", bold=True)
+            click.secho("\n[ERRO] Nenhum binário de Servidor (barriers.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
+            click.echo("👉 Execute: sysutils leap setup")
             raise SystemExit(1)
 
         click.echo(f"  • Motor KVM       : {click.style(bin_server, fg='cyan')}")
         click.echo("\n[*] Iniciando servidor KVM na porta 24800...")
 
+        # Invocação segura via dicionário de comandos do Click (elimina NameError)
         host_cmd = cli.commands.get("host")
         if host_cmd:
             ctx.invoke(host_cmd, client="bluebaby", port=24800)
+        else:
+            click.secho("[ERRO] Subcomando 'host' não registrado no grupo CLI.", fg="red")
         return
 
-    # 2. ESTAÇÃO BLUEBABY (CLIENTE / RECEPTOR)
+    # ═══════════════════════════════════════════════════════════
+    # ESTAÇÃO 2: BLUEBABY (CLIENTE / JOIN)
+    # ═══════════════════════════════════════════════════════════
     click.echo(f"  • Papel Detectado : {click.style('CLIENTE RECEPTOR (Bluebaby)', bold=True, fg='yellow')}")
     click.echo("  • Função          : Receber comandos de mouse e teclado da Amaranth.")
 
     bin_client = find_kvm_binary("client")
     if not bin_client:
-        click.secho("\n[ERRO] Nenhum binário de Cliente (barrierc.exe) localizado.", fg="red", bold=True)
+        click.secho("\n[ERRO] Nenhum binário de Cliente (barrierc.exe / deskflow-core.exe) localizado.", fg="red", bold=True)
+        click.echo("👉 Execute: sysutils leap setup")
         raise SystemExit(1)
 
     click.echo(f"  • Motor KVM       : {click.style(bin_client, fg='cyan')}")
 
+    # Prioriza o IP estável do Tailscale, depois IP local
     candidate_ips = ["100.113.157.27", "192.168.18.52"]
     server_ip = None
 
-    click.echo("\n[*] Auditando porta 24800 no Servidor Amaranth...")
+    click.echo("\n[*] Buscando Servidor Amaranth ativo na porta 24800...")
     for ip in candidate_ips:
         click.echo(f"    • Testando {ip}:24800...", nl=False)
-        alive, latency = probe_kvm_socket(ip, port=24800, timeout=1.5)
-        if alive:
-            click.secho(f" [RESPONDENDO! Latência: {latency:.1f}ms]", fg="green", bold=True)
+        if probe_kvm_port(ip, port=24800, timeout=1.5):
+            click.secho(" [RESPONDENDO!]", fg="green", bold=True)
             server_ip = ip
             break
         else:
             click.secho(" [fechada]", fg="yellow")
 
     if not server_ip:
-        click.secho("\n[AVISO] Amaranth não respondeu na porta 24800.", fg="yellow")
+        click.secho("\n[AVISO] Amaranth não respondeu nas portas habituais.", fg="yellow")
+        click.echo("👉 Certifique-se de que rodou 'sysutils leap auto' na Amaranth primeiro.")
         server_ip = click.prompt("Digite o IP do servidor manualmente", default="100.113.157.27")
 
-    # Invocação unificada e segura do comando join
+    click.secho(f"\n[*] Conectando Bluebaby ao Servidor em {server_ip}:24800...", fg="cyan")
+
     join_cmd = cli.commands.get("join")
     if join_cmd:
-        ctx.invoke(join_cmd, server=server_ip, name="bluebaby", port=24800)
+        # Auto-inspeção: descobre o nome exato do parâmetro (server, host, address, etc.)
+        kwargs = {}
+        for p in join_cmd.params:
+            if p.name in ("server", "host", "address", "ip", "server_address", "server_ip"):
+                kwargs[p.name] = server_ip
+            elif p.name == "name":
+                kwargs["name"] = "bluebaby"
+            elif p.name == "port":
+                kwargs["port"] = 24800
+
+        # Fallback: se nenhum nome conhecido bater, injeta no primeiro Argument posicional
+        if not any(k in kwargs for k in ("server", "host", "address", "ip", "server_address", "server_ip")):
+            for p in join_cmd.params:
+                if isinstance(p, click.Argument):
+                    kwargs[p.name] = server_ip
+                    break
+
+        ctx.invoke(join_cmd, **kwargs)
+    else:
+        click.secho("[ERRO] Subcomando 'join' não registrado no grupo CLI.", fg="red")
 
