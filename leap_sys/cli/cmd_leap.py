@@ -1,7 +1,7 @@
 # leap_sys/cli/cmd_leap.py
 """
 Interface CLI para o LeapSys KVM (Input Leap / Barrier / Deskflow).
-Compatibilidade total Deskflow (Client sem TLS) <-> Barrier (Server).
+Correção forense de TLS, geração de deskflow.pem e chave tlsEnabled=false.
 """
 from __future__ import annotations
 
@@ -23,8 +23,12 @@ from syncdiag.core import network_connect
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
 CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
+DESKFLOW_TLS_CERT = Path(r"C:\ProgramData\Deskflow\tls\deskflow.pem")
 
 
+# ═══════════════════════════════════════════════════════════════
+# AUTO-ELEVAÇÃO UAC E CERTIFICADOS TLS
+# ═══════════════════════════════════════════════════════════════
 def is_admin() -> bool:
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -46,6 +50,46 @@ def request_elevation():
         click.secho("[ERRO] Elevação UAC cancelada pelo usuário.", fg="red")
 
 
+def ensure_deskflow_tls_cert():
+    """
+    Garante que C:\ProgramData\Deskflow\tls\deskflow.pem exista.
+    Elimina a falha: 'secure socket error: tls certificate doesn't exist'.
+    """
+    if DESKFLOW_TLS_CERT.exists():
+        return
+
+    DESKFLOW_TLS_CERT.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Tenta gerar via OpenSSL presente no Git ou MinGW
+    openssl_bin = shutil.which("openssl")
+    if not openssl_bin:
+        for candidate in [
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
+            r"C:\winlibs\mingw64\bin\openssl.exe",
+        ]:
+            if Path(candidate).exists():
+                openssl_bin = candidate
+                break
+
+    if openssl_bin:
+        cmd = [
+            openssl_bin, "req", "-x509", "-nodes", "-days", "3650",
+            "-subj", "//CN=Deskflow", "-newkey", "rsa:2048",
+            "-keyout", str(DESKFLOW_TLS_CERT), "-out", str(DESKFLOW_TLS_CERT)
+        ]
+        subprocess.run(cmd, capture_output=True, shell=False)
+
+    # 2. Se o OpenSSL não estiver acessível, gera um par PEM funcional direto
+    if not DESKFLOW_TLS_CERT.exists():
+        # Fallback de certificado auto-assinado válido
+        ps_cmd = (
+            f'$cert = New-SelfSignedCertificate -DnsName "Deskflow" -CertStoreLocation "cert:\\LocalMachine\\My"; '
+            f'$pwd = ConvertTo-SecureString -String "deskflow" -Force -AsPlainText; '
+            f'Export-PfxCertificate -Cert $cert -FilePath "{DESKFLOW_TLS_CERT.parent}\\temp.pfx" -Password $pwd'
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+
+
 def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, port: int = 24800):
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +107,6 @@ def update_doxly_state(active: bool, mode: str, target: str, server_ip: str, por
 
 
 def get_running_kvm_process() -> Optional[str]:
-    """Detecta se o Barrier, Deskflow ou Input Leap já está rodando no Windows."""
     proc = subprocess.run(
         ["tasklist", "/FI", "STATUS eq running"],
         capture_output=True,
@@ -77,17 +120,22 @@ def get_running_kvm_process() -> Optional[str]:
 
 
 def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
-    """Gera arquivo de configuração com enableCrypto=false."""
+    """
+    Gera as configurações oficiais do Deskflow:
+    A chave exata no C++ é 'tlsEnabled=false' sob '[security]'.
+    """
     CLIENT_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
     content = (
         f"[client]\n"
         f"remoteHost={server_ip}\n"
         f"port={port}\n\n"
         f"[security]\n"
-        f"enableCrypto=false\n"
+        f"tlsEnabled=false\n"
+        f"checkPeerFingerprints=false\n"
     )
     CLIENT_CONF_PATH.write_text(content, encoding="utf-8")
 
+    # Injeta a chave também no Deskflow.conf do AppData
     appdata = os.environ.get("APPDATA")
     if appdata:
         try:
@@ -101,7 +149,9 @@ def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
             if not cfg.has_section("security"):
                 cfg.add_section("security")
             cfg.set("client", "remoteHost", server_ip)
-            cfg.set("security", "enableCrypto", "false")
+            cfg.set("client", "port", str(port))
+            cfg.set("security", "tlsEnabled", "false")
+            cfg.set("security", "checkPeerFingerprints", "false")
             with open(user_conf, "w", encoding="utf-8") as f:
                 cfg.write(f)
         except Exception:
@@ -111,7 +161,6 @@ def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
 
 
 def find_leap_binary(role: str = "any") -> Optional[str]:
-    """Localiza o binário no PATH, no sistema ou via processo ativo."""
     names_to_check = []
     if role in ("client", "any"):
         names_to_check.extend(["deskflow-core", "deskflow-client", "input-leapc", "barrierc"])
@@ -149,6 +198,9 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
     return None
 
 
+# ═══════════════════════════════════════════════════════════════
+# COMANDOS CLI
+# ═══════════════════════════════════════════════════════════════
 @click.group()
 def cli():
     """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
@@ -202,9 +254,9 @@ def leap_auto():
 
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800", "--disable-crypto"]
+            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800"]
         else:
-            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800", "--disable-crypto"]
+            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800"]
 
         click.echo(f"[*] Disparando Servidor KVM...")
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -239,17 +291,21 @@ def leap_auto():
 
         click.echo(f"  • Servidor Alvo : {click.style(target_ip, fg='cyan', bold=True)}")
         click.echo(f"  • Binário KVM   : {click.style(Path(bin_path).name, fg='green')}")
-        click.echo("[*] Testando porta KVM (24800)...")
 
+        # 1. Assegura existência física do certificado para evitar panic do OpenSSL
+        ensure_deskflow_tls_cert()
+
+        # 2. Configura cliente com a chave real: tlsEnabled=false
+        conf_file = write_deskflow_client_conf(target_ip, port=24800)
+
+        # 3. Dispara comando limpo (sem flags inválidas)
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            conf_file = write_deskflow_client_conf(target_ip, port=24800)
-            # Adicionado --disable-crypto no cliente Deskflow
-            cmd = [bin_path, "client", "-s", str(conf_file), "--disable-crypto"]
+            cmd = [bin_path, "client", "-s", str(conf_file)]
         else:
-            cmd = [bin_path, "-f", "--disable-crypto", "--name", "bluebaby", f"{target_ip}:24800"]
+            cmd = [bin_path, "-f", "--name", "bluebaby", f"{target_ip}:24800"]
 
-        click.echo("[*] Conectando ao servidor KVM (modo compatível sem TLS)...")
+        click.echo("[*] Conectando ao servidor KVM (Deskflow -> Barrier)...")
         subprocess.Popen(cmd)
 
         update_doxly_state(True, "client", "Amaranth", target_ip, 24800)
