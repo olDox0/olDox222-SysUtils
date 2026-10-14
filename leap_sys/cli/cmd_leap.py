@@ -25,9 +25,6 @@ STATE_FILE = Path.home() / ".doxoade" / "leap_state.json"
 CLIENT_CONF_PATH = Path.home() / ".doxoade" / "deskflow_client.conf"
 
 
-# ═══════════════════════════════════════════════════════════════
-# AUTO-ELEVAÇÃO UAC E INTEGRAÇÃO DOXLY
-# ═══════════════════════════════════════════════════════════════
 def is_admin() -> bool:
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -80,10 +77,7 @@ def get_running_kvm_process() -> Optional[str]:
 
 
 def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
-    """
-    Gera arquivo de configuração com enableCrypto=false para que o Deskflow
-    conecte perfeitamente ao Barrier da Amaranth sem erro de TLS.
-    """
+    """Gera arquivo de configuração com enableCrypto=false."""
     CLIENT_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
     content = (
         f"[client]\n"
@@ -94,7 +88,6 @@ def write_deskflow_client_conf(server_ip: str, port: int = 24800) -> Path:
     )
     CLIENT_CONF_PATH.write_text(content, encoding="utf-8")
 
-    # Injeta enableCrypto=false também no Deskflow.conf do AppData
     appdata = os.environ.get("APPDATA")
     if appdata:
         try:
@@ -125,13 +118,11 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
     if role in ("server", "any"):
         names_to_check.extend(["deskflow-core", "deskflow-server", "input-leaps", "barriers"])
 
-    # 1. Checa no PATH
     for name in names_to_check:
         found = shutil.which(name)
         if found:
             return found
 
-    # 2. Descobre o caminho do processo se ele já estiver rodando
     for name in names_to_check:
         cmd = f'powershell -NoProfile -Command "(Get-Process -Name \'{name}\' -ErrorAction SilentlyContinue).Path"'
         p = subprocess.run(cmd, capture_output=True, text=True, shell=True)
@@ -139,7 +130,6 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
         if out and out[0] and Path(out[0]).exists():
             return out[0]
 
-    # 3. Pastas Padrões
     roots = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
         Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
@@ -159,9 +149,6 @@ def find_leap_binary(role: str = "any") -> Optional[str]:
     return None
 
 
-# ═══════════════════════════════════════════════════════════════
-# COMANDOS CLI
-# ═══════════════════════════════════════════════════════════════
 @click.group()
 def cli():
     """LeapSys — Compartilhamento de Mouse & Teclado (Input Leap / Barrier / Deskflow)."""
@@ -181,11 +168,9 @@ def leap_auto():
     is_server = "amaranth" in hostname
 
     if is_server:
-        # ═══ AMARANTH (SERVIDOR MASTER) ═══
         click.secho("  • Papel Detectado: SERVIDOR MASTER (Amaranth)", fg="green", bold=True)
         click.echo("  • Compartilhando teclado e mouse com: bluebaby\n")
 
-        # Verifica se o servidor já está ativo
         running = get_running_kvm_process()
         if running:
             click.secho(f"  ✔ Servidor KVM já está em execução ({running})!", fg="green", bold=True)
@@ -217,9 +202,9 @@ def leap_auto():
 
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800"]
+            cmd = [bin_path, "server", "-s", str(config_path), "--address", ":24800", "--disable-crypto"]
         else:
-            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800"]
+            cmd = [bin_path, "-f", "--config", str(config_path), "--address", ":24800", "--disable-crypto"]
 
         click.echo(f"[*] Disparando Servidor KVM...")
         subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -228,7 +213,6 @@ def leap_auto():
         click.secho("\n[OK] Servidor ativo e aguardando conexão da Bluebaby!", fg="green", bold=True)
 
     else:
-        # ═══ BLUEBABY (CLIENTE SECUNDÁRIO) ═══
         click.secho("  • Papel Detectado: CLIENTE SECUNDÁRIO (Bluebaby)", fg="yellow", bold=True)
         click.echo("  • Localizando servidor Amaranth...\n")
 
@@ -259,11 +243,11 @@ def leap_auto():
 
         bin_name = Path(bin_path).name.lower()
         if "deskflow-core" in bin_name:
-            # Injeta enableCrypto=false para parear com o Barrier da Amaranth
             conf_file = write_deskflow_client_conf(target_ip, port=24800)
-            cmd = [bin_path, "client", "-s", str(conf_file)]
+            # Adicionado --disable-crypto no cliente Deskflow
+            cmd = [bin_path, "client", "-s", str(conf_file), "--disable-crypto"]
         else:
-            cmd = [bin_path, "-f", "--name", "bluebaby", f"{target_ip}:24800"]
+            cmd = [bin_path, "-f", "--disable-crypto", "--name", "bluebaby", f"{target_ip}:24800"]
 
         click.echo("[*] Conectando ao servidor KVM (modo compatível sem TLS)...")
         subprocess.Popen(cmd)
