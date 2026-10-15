@@ -381,3 +381,54 @@ def share_auto():
 
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
 
+@cli.group("android")
+def android_group():
+    """🤖 Subsistema de Conexão e Troca de Arquivos com Android (Tailscale)."""
+    pass
+
+
+@android_group.command("web")
+@click.option("--port", "-p", default=8080, show_default=True, help="Porta HTTP do servidor móvel.")
+def android_web(port):
+    """Inicia o Micro Hub Web para upload e download via navegador do celular."""
+    from syncdiag.core import android_hub
+    click.secho("\n=======================================================", fg="cyan")
+    click.secho(" 📱 SYNCDIAG ANDROID WEB HUB (TAILSCALE STAGING)", fg="cyan", bold=True)
+    click.secho("=======================================================\n", fg="cyan")
+    try:
+        android_hub.run_micro_hub(requested_port=port)
+    except KeyboardInterrupt:
+        click.secho("\n[PARADO] Servidor Android Hub encerrado.", fg="yellow")
+
+
+@android_group.command("send")
+@click.argument("filepath", type=click.Path(exists=True))
+@click.option("--target", default="android", help="Nome do dispositivo no Tailscale.")
+def android_send(filepath, target):
+    """Envia um arquivo para o Android via Taildrop P2P instantâneo."""
+    import subprocess
+    click.echo(f"[*] Despachando '{filepath}' para o dispositivo '{target}' via Taildrop...")
+    cmd = ["tailscale", "file", "cp", filepath, f"{target}:"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        click.secho(f"[OK] Arquivo enviado com sucesso para '{target}'!", fg="green", bold=True)
+    else:
+        click.secho(f"[ERRO] Falha no envio: {proc.stderr or proc.stdout}", fg="red")
+
+
+@android_group.command("smb-card")
+def android_smb_card():
+    """Gera o cartão de conexão SMB para cadastrar no gerenciador do celular."""
+    from syncdiag.core import android_hub, network_connect
+    station_key, profile = network_connect.identify_current_station()
+    ip = android_hub.get_tailscale_ip()
+    
+    click.secho("\n--- DADOS DE CONEXÃO SMB PARA O CELULAR ---", fg="cyan", bold=True)
+    click.echo(f"  • Servidor / Host : {click.style(str(ip), fg='green', bold=True)}")
+    click.echo(f"  • Pasta / Share   : {click.style(profile['local_share_name'], fg='yellow', bold=True)}")
+    click.echo(f"  • Caminho Completo: smb://{ip}/{profile['local_share_name']}")
+    click.echo(f"  • Usuário         : (seu usuário Windows local)")
+    click.echo(f"  • Senha           : (sua senha cadastrada)")
+    click.secho("-------------------------------------------\n", fg="cyan")
+
+share_group.add_command(android_group, "android")

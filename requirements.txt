@@ -1,16 +1,13 @@
 # Core CLI & Interfaces
+# Criptografia & Segurança PQC
+# Ferramentas de Build (para suporte a setup/editable)
+# Hardware & Telemetria
+# Motores de Compressão
 click>=8.1.0
 colorama>=0.4.6
-
-# Hardware & Telemetria
+flask==3.1.3
 psutil>=5.9.5
-
-# Criptografia & Segurança PQC
 pycryptodome>=3.19.0
-
-# Motores de Compressão
-zstandard>=0.22.0
-
-# Ferramentas de Build (para suporte a setup/editable)
 setuptools>=68.0.0
 wheel>=0.41.0
+zstandard>=0.22.0
