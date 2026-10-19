@@ -59,7 +59,7 @@ def fix_uac_linked_connections() -> None:
     """
     Ativa EnableLinkedConnections no Registro do Windows.
     Garante que unidades mapeadas no terminal Administrador apareçam
-    imediatamente no Windows Explorer sem o erro 'Z:\ não está disponível'.
+    imediatamente no Windows Explorer sem o erro 'Z:\\ não está disponível'.
     """
     cmd = (
         'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" '
