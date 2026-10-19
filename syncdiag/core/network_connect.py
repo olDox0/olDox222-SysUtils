@@ -95,14 +95,52 @@ def _find_tailscale_bin() -> Optional[str]:
     return None
 
 
-def probe_smb_port(host: str, port: int = 445, timeout: float = 2.0) -> bool:
-    """Verifica se o host remoto responde na porta 445 sem congelar o sistema."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (socket.timeout, ConnectionRefusedError, OSError):
-        return False
+def probe_smb_port(host: str, port: int = 445, timeout: float = 1.8, retries: int = 3) -> bool:
+    """Verifica se o host responde na porta 445 com retries para absorver o despertar do Tailscale."""
+    for attempt in range(retries):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            if attempt < retries - 1:
+                time.sleep(1.0)
+    return False
 
+def cleanup_stale_mounts_for_unc(unc_path: str) -> List[str]:
+    """
+    Localiza e desconecta todas as unidades duplicadas ou zumbis 
+    que apontem para o mesmo caminho UNC remoto.
+    """
+    removed_letters = []
+    proc = subprocess.run(["net", "use"], capture_output=True, text=True, errors="replace")
+    target_norm = unc_path.lower().rstrip("\\")
+
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        for i, token in enumerate(parts):
+            if len(token) == 2 and token[1] == ":" and token[0].isalpha():
+                letter = token.upper()
+                for candidate in parts[i + 1:]:
+                    if candidate.startswith(r"\\") and candidate.lower().rstrip("\\") == target_norm:
+                        subprocess.run(["net", "use", letter, "/DELETE", "/YES"], capture_output=True, text=True)
+                        removed_letters.append(letter)
+                        break
+    return removed_letters
+
+def get_preferred_drive_letter(preferred: str = "Z:") -> str:
+    """Retorna a letra Z: preferencialmente; se ocupada por disco físico, busca a próxima livre."""
+    # Se Z: não for um disco local físico (C:, D: de verdade), ela é a escolhida
+    if not os.path.exists(preferred):
+        return preferred
+
+    # Se estiver ocupada por um mapeamento de rede antigo, será limpa pelo cleanup
+    # Caso seja disco físico fixo, busca de Y para trás
+    for letter in reversed(string.ascii_uppercase):
+        candidate = f"{letter}:"
+        if not os.path.exists(candidate) and candidate not in ["A:", "B:", "C:"]:
+            return candidate
+
+    return preferred
 
 def get_tailscale_peers() -> List[Dict[str, str]]:
     """Consulta máquinas ativas via CLI do Tailscale."""

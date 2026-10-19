@@ -358,7 +358,15 @@ def share_auto():
     remote_share = profile["remote_share_name"]
     unc_path = f"\\\\{remote_ip}\\{remote_share}"
 
-    click.echo(f"\n[*] Conectando à pasta remota '{unc_path}' na unidade {drive_letter}...")
+    # 1. AUTO-LIMPEZA DE FANTASMAS: Remove mapeamentos duplicados anteriores (X:, Y:, etc.)
+    cleaned = network_connect.cleanup_stale_mounts_for_unc(unc_path)
+    if cleaned:
+        click.echo(f"[*] Limpeza preventiva: removidas unidades antigas duplicadas ({', '.join(cleaned)}).")
+
+    # 2. SELEÇÃO DA LETRA PADRÃO (Z: como padrão único)
+    drive_letter = network_connect.get_preferred_drive_letter("Z:")
+
+    click.echo(f"[*] Conectando à pasta remota '{unc_path}' na unidade {drive_letter}...")
     success, msg = network_connect.mount_network_drive(
         unc_path=unc_path,
         drive_letter=drive_letter,
@@ -370,16 +378,28 @@ def share_auto():
 
     if success:
         click.secho(f"\n[SUCESSO] Conectado à outra máquina com sucesso!", fg="green", bold=True)
-        click.secho(f"👉 Abrindo unidade '{drive_letter}' e pasta de rede no Windows Explorer...", fg="cyan")
+        click.secho(f"👉 Abrindo unidade '{drive_letter}' no Windows Explorer...", fg="cyan")
         network_connect.open_in_explorer(drive_letter)
-        # Abre também o UNC direto caso o UAC demore a atualizar
-        network_connect.open_in_explorer(unc_path)
     else:
         click.secho(f"\n[AVISO] {msg}", fg="yellow")
         click.echo("[*] Abrindo acesso direto via UNC no Windows Explorer...")
         network_connect.open_in_explorer(unc_path)
 
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
+
+@share_group.command("clean")
+@click.option("--all", "clean_all", is_flag=True, help="Remove todas as unidades de rede mapeadas.")
+def share_clean(clean_all):
+    """🧹 Remove mapeamentos de rede fantasmas ou desconectados (com X vermelho)."""
+    click.echo("[*] Executando faxina de conexões de rede do Windows...")
+    cmd = ["net", "use", "*", "/DELETE", "/YES"] if clean_all else ["net", "use"]
+    
+    proc = subprocess.run(["net", "use", "*", "/DELETE", "/YES"], capture_output=True, text=True, errors="replace")
+    if proc.returncode == 0:
+        click.secho("[OK] Todas as unidades de rede fantasmas foram removidas com sucesso!", fg="green", bold=True)
+        click.echo("👉 Agora execute 'sysutils share auto' para montar apenas a unidade oficial.")
+    else:
+        click.secho(f"[AVISO] {proc.stderr or proc.stdout}", fg="yellow")
 
 @cli.group("android")
 def android_group():
