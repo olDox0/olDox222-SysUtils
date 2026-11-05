@@ -21,8 +21,19 @@ BUILD_TOOLS_DIR = BIN_ANDROID_DIR / "build-tools"
 
 BUILD_TOOLS_URL_A = "https://dl.google.com/android/repository/build-tools_r34-windows.zip"
 BUILD_TOOLS_URL_B = "https://dl.google.com/android/repository/build-tools_r33-windows.zip"
+
 PLATFORM_JAR_URL_A = "https://dl.google.com/android/repository/platform-33_r02.zip"
 PLATFORM_JAR_URL_B = "https://dl.google.com/android/repository/platform-34-ext7_r03.zip"
+# ─── SHIZUKU JARS ───
+SHIZUKU_API_URL = "https://repo1.maven.org/maven2/dev/rikka/shizuku/api/13.1.5/api-13.1.5.jar"
+SHIZUKU_PROVIDER_URL = "https://repo1.maven.org/maven2/dev/rikka/shizuku/provider/13.1.5/provider-13.1.5-javadoc.jar"
+# ─── SHIZUKU AAR FILES ───
+SHIZUKU_API_AAR      = "https://repo1.maven.org/maven2/dev/rikka/shizuku/api/13.1.5/api-13.1.5.aar"
+SHIZUKU_PROVIDER_AAR = "https://repo1.maven.org/maven2/dev/rikka/shizuku/provider/13.1.5/provider-13.1.5.aar"
+SHIZUKU_AIDL_AAR     = "https://repo1.maven.org/maven2/dev/rikka/shizuku/aidl/13.1.5/aidl-13.1.5.aar"
+SHIZUKU_SHARED_AAR   = "https://repo1.maven.org/maven2/dev/rikka/shizuku/shared/13.1.5/shared-13.1.5.aar"
+
+ANNOTATION_JAR = "https://dl.google.com/dl/android/maven2/androidx/annotation/annotation/1.7.0/annotation-1.7.0.jar"
 
 def find_java_tool(tool_name: str = "java") -> Optional[str]:
     """Localiza executáveis do Java no PATH ou nas pastas padrões do Windows."""
@@ -187,3 +198,52 @@ def _format_size(size: int) -> str:
         if size < 1024: return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} TB"
+
+def ensure_shizuku_libs() -> Tuple[bool, str]:
+    """Baixa os JARs/AARs do Shizuku e do AndroidX para a pasta libs."""
+    import zipfile
+
+    libs_dir = PROJECT_ROOT / "android_sys" / "templates" / "benzaiten_shell" / "libs"
+    libs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Arquivos de origem: nome_destino -> URL
+    remote_files = {
+        "shizuku-api.jar": SHIZUKU_API_AAR,          # .aar
+        "shizuku-provider.jar": SHIZUKU_PROVIDER_AAR,  # .aar
+        "shizuku-aidl.jar": SHIZUKU_AIDL_AAR,        # .aar
+        "shizuku-shared.jar": SHIZUKU_SHARED_AAR,    # .aar
+        "androidx-annotation.jar": ANNOTATION_JAR,   # .jar direto
+    }
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for dest_name, url in remote_files.items():
+        dest_path = libs_dir / dest_name
+        if dest_path.exists():
+            continue
+
+        # Se for .jar direto, baixa como .jar
+        if url.endswith(".jar"):
+            ok, msg = _download_with_progress(url, dest_path, headers)
+            if not ok:
+                dest_path.unlink(missing_ok=True)
+                return False, f"Falha ao baixar {dest_name}: {msg}"
+            continue
+
+        # Se for .aar, baixa temporariamente e extrai classes.jar
+        tmp_aar = libs_dir / (dest_name + ".aar.tmp")
+        ok, msg = _download_with_progress(url, tmp_aar, headers)
+        if not ok:
+            tmp_aar.unlink(missing_ok=True)
+            return False, f"Falha ao baixar {dest_name}: {msg}"
+
+        try:
+            with zipfile.ZipFile(tmp_aar, "r") as z:
+                with z.open("classes.jar") as src, open(dest_path, "wb") as dst:
+                    dst.write(src.read())
+            tmp_aar.unlink(missing_ok=True)
+        except KeyError:
+            tmp_aar.unlink(missing_ok=True)
+            return False, f"O .aar de {dest_name} não contém classes.jar"
+
+    return True, "JARs do Shizuku e AndroidX extraídos com sucesso."

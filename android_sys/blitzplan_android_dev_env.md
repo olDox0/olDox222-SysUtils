@@ -484,3 +484,4 @@ Seguindo o princípio de testagem calma e sem *development hell* (`Discussão �
 ```
 
 Com esta base delimitada e validada segundo os cânones do `ProDeNov`, podemos avançar para a **codificação do RIT 1** com total segurança e clareza de escopo.
+

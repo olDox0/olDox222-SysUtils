@@ -11,11 +11,7 @@ Pipeline completo:
 Conformidade: ProDeNov 1.2, 3.1.4 e 5.3.
 """
 from __future__ import annotations
-import os
-import sys
-import shutil
-import zipfile
-import subprocess
+import os, sys, shutil, zipfile, subprocess
 from pathlib import Path
 from typing import Tuple, List, Optional
 from android_sys.core import sdk_installer
@@ -26,9 +22,15 @@ BUILD_DIR = PROJECT_ROOT / "data" / "android_build"
 
 def preflight_check(source_assets_dir: Path | None = None) -> Tuple[bool, str]:
     sdk_installer.inject_java_env()
+    
+    # NOVO: Baixa os JARs do Shizuku antes de tentar compilar
+    ok_shz, msg_shz = sdk_installer.ensure_shizuku_libs()
+    if not ok_shz:
+        return False, msg_shz
+        
     tools = sdk_installer.get_required_tools()
     for name in ["aapt2", "zipalign", "android_jar"]:
-        if not tools[name].exists():
+        if not tools[name].exists(): 
             return False, f"Ferramenta '{name}' ausente. Execute 'sysutils android sdk setup --apply'."
     return True, "Preflight aprovado."
 
@@ -166,26 +168,34 @@ def build_apk(
     dex_out = BUILD_DIR / "classes.dex"
     java_src = TEMPLATES_DIR / "src" / "MainActivity.java"
     _ensure_main_activity_source(java_src)
-
     javac_bin = sdk_installer.find_java_tool("javac")
+    
+    # NOVO: Configurar classpath com os JARs do Shizuku
+    libs_dir = TEMPLATES_DIR / "libs"
+    libs_jars = [str(p) for p in libs_dir.glob("*.jar")] if libs_dir.exists() else []
+    cp_list = [str(tools["android_jar"])] + libs_jars
+    cp_str = os.pathsep.join(cp_list)
+
     if javac_bin:
         tmp_classes_dir.mkdir(parents=True, exist_ok=True)
         cmd_javac = [
-            javac_bin, "-cp", str(tools["android_jar"]),
+            javac_bin, "-cp", cp_str,
             "-d", str(tmp_classes_dir),
             str(java_src)
         ]
         p_javac = subprocess.run(cmd_javac, capture_output=True, text=True)
-        if p_javac.returncode != 0:
-            return False, f"Falha no javac: {p_javac.stderr}", logs
-
+        if p_javac.returncode != 0: return False, f"Falha no javac: {p_javac.stderr}", logs
+        
         class_files = [str(p) for p in tmp_classes_dir.rglob("*.class")]
-        cmd_d8 = [str(tools["d8"]), "--output", str(BUILD_DIR), "--min-api", "24"] + class_files
+        
+        # NOVO: Passar os JARs do Shizuku para o d8
+        cmd_d8 = [str(tools["d8"]), "--output", str(BUILD_DIR), "--min-api", "24"]
+        cmd_d8.extend(libs_jars)
+        cmd_d8.extend(class_files)
+        
         p_d8 = subprocess.run(cmd_d8, shell=True, capture_output=True, text=True)
-        if p_d8.returncode != 0:
-            return False, f"Falha no d8: {p_d8.stderr}", logs
-    else:
-        return False, "Compilador 'javac' não encontrado.", logs
+        if p_d8.returncode != 0: return False, f"Falha no d8: {p_d8.stderr}", logs
+    else: return False, "Compilador 'javac' não encontrado.", logs
 
     # 4. Injeção de classes.dex e assets HTML/JS
     logs.append("[*] Injetando classes.dex e assets HTML/JS...")

@@ -1,111 +1,123 @@
 <!DOCTYPE html>
-<!-- android_sys/templates/benzaiten_shell/assets/index.html -->
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Benzaiten NeoGUI Mobile</title>
+    <title>SysUtils Mobile</title>
     <style>
-        :root {
-            --bg: #0F0D0F;
-            --panel: #19171A;
-            --border: #4C4552;
-            --accent: #26BC5F;
-            --text: #D2DCE6;
-        }
+        :root { --bg: #0F0D0F; --panel: #19171A; --border: #4C4552; --accent: #26BC5F; --text: #D2DCE6; --danger: #B32E2E; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-        }
-        header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 15px;
-            margin-bottom: 20px;
-        }
-        h1 { font-size: 20px; color: var(--accent); }
-        .badge {
-            background: #197B3F;
-            color: #FFF;
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: bold;
-        }
-        .card {
-            background: var(--panel);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 16px;
-            margin-bottom: 15px;
-        }
-        .btn {
-            background: var(--accent);
-            color: #0F0D0F;
-            border: none;
-            padding: 12px 20px;
-            border-radius: 8px;
-            font-weight: bold;
-            font-size: 14px;
-            width: 100%;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        .btn:active { opacity: 0.8; }
-        #console {
-            background: #000;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 10px;
-            font-family: monospace;
-            font-size: 12px;
-            flex: 1;
-            overflow-y: auto;
-            color: #38BC5F;
-        }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; padding: 12px; display: flex; flex-direction: column; height: 100vh; }
+        header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 12px; }
+        .logo-box { display: flex; align-items: center; gap: 8px; }
+        .logo-box img { height: 28px; width: auto; }
+        h1 { font-size: 16px; color: var(--accent); }
+        .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+        .btn { background: var(--accent); color: #0F0D0F; border: none; padding: 8px; border-radius: 6px; font-weight: bold; font-size: 12px; width: 100%; cursor: pointer; margin-top: 8px; }
+        .btn.stop { background: var(--danger); color: #FFF; }
+        .stat-row { display: flex; justify-content: space-between; font-family: monospace; font-size: 11px; padding: 2px 0; }
+        .stat-row .label { color: #888; }
+        .stat-row .value { color: var(--accent); font-weight: bold; }
+        #audio-events { background: #000; border: 1px solid var(--border); border-radius: 6px; padding: 6px; font-family: monospace; font-size: 10px; max-height: 100px; overflow-y: auto; color: #38BC5F; margin-top: 8px; }
+        .focus-item { font-size: 11px; padding: 2px 0; border-bottom: 1px solid #222; }
+        .focus-item .pkg { color: var(--text); }
+        .focus-item .gain { color: var(--accent); font-weight: bold; margin-left: 6px; }
     </style>
     <script src="dx_bridge.js"></script>
 </head>
 <body>
     <header>
-        <h1>🐉 Benzaiten NeoGUI</h1>
-        <span class="badge">MOBILE SHELL</span>
+        <div class="logo-box">
+            <img src="logo.png" alt="Logo" onerror="this.style.display='none'">
+            <h1>SysUtils Mobile</h1>
+        </div>
+        <span class="badge" style="background: #197B3F; padding: 2px 6px; border-radius: 4px; font-size: 9px;">TIER 2</span>
     </header>
 
     <div class="card">
-        <h3>Ponte Hermes Nativa</h3>
-        <p style="font-size: 13px; color: #888; margin-top: 5px;">
-            Ambiente móvel desacoplado. Controle por linha de comando ativo via SysUtils.
-        </p>
-        <button class="btn" onclick="testBridge()">⚡ Testar Envio Hermes</button>
+        <h3 style="font-size: 13px; margin-bottom: 6px;">🎵 Audio Monitor</h3>
+        <div class="stat-row"><span class="label">Shizuku</span><span class="value" id="shizuku-status" style="color: #888;">...</span></div>
+        <div class="stat-row"><span class="label">Music Active</span><span class="value" id="am-music">?</span></div>
+        <div class="stat-row"><span class="label">Music Volume</span><span class="value" id="am-vol">?</span></div>
+        <button class="btn" id="btn-monitor" data-monitoring="0">▶ Start Monitor</button>
+        <div id="audio-events">[aguardando]</div>
+
+        <!-- Adicione este botão logo abaixo do botão Start Monitor -->
+        <button class="btn" style="background: #4C4552; color: #FFF; margin-top: 4px;" onclick="runDiag()">🩺 Diagnóstico Shizuku</button>
+        
+        <!-- Adicione esta div logo abaixo do log de eventos -->
+        <pre id="diag-output" style="display:none; background: #111; padding: 8px; font-size: 10px; color: #38BC5F; margin-top: 8px; border-radius: 6px; overflow-x: auto;"></pre>
     </div>
 
-    <div id="console">[SISTEMA] Aguardando comandos...</div>
+    <div class="card" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+        <h3 style="font-size: 13px; margin-bottom: 6px;">🔊 Focus Stack (Shizuku)</h3>
+        <div id="focus-stack" style="flex: 1; overflow-y: auto; background: #000; padding: 8px; border-radius: 6px; border: 1px solid var(--border);">
+            <div style="color: #888; font-size: 11px;">[Aguardando monitor...]</div>
+        </div>
+    </div>
 
     <script>
-        function log(msg) {
-            const c = document.getElementById('console');
-            c.innerHTML += '<br>&gt; ' + msg;
-            c.scrollTop = c.scrollHeight;
+        function logEvent(html) {
+            const log = document.getElementById('audio-events');
+            if (log.textContent.startsWith('[aguardando')) log.textContent = '';
+            const line = document.createElement('div');
+            line.innerHTML = html;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
         }
 
-        async function testBridge() {
-            log('Enviando ping para o backend via __dx_send__...');
+        async function runDiag() {
+            const pre = document.getElementById('diag-output');
+            pre.style.display = 'block';
+            pre.textContent = "Consultando...";
             try {
-                const res = await window.__dx_send__('ping', { timestamp: Date.now() });
-                log('Resposta: ' + JSON.stringify(res));
-            } catch(e) {
-                log('Erro: ' + e.message);
+                const res = await window.__dx_shizuku_diag__();
+                pre.textContent = JSON.stringify(res, null, 2);
+            } catch (e) {
+                pre.textContent = "ERRO: " + e.message;
             }
         }
+
+        document.getElementById('btn-monitor').onclick = async function() {
+            const btn = this;
+            const isOn = btn.dataset.monitoring === '1';
+            if (isOn) {
+                await window.__dx_audio__.stop();
+                btn.dataset.monitoring = '0';
+                btn.textContent = '▶ Start Monitor';
+                btn.classList.remove('stop');
+                logEvent('<span style="color:#888">[STOP]</span>');
+            } else {
+                await window.__dx_audio__.start(2000);
+                btn.dataset.monitoring = '1';
+                btn.textContent = '■ Stop Monitor';
+                btn.classList.add('stop');
+                logEvent('<span style="color:#26BC5F">[START] monitor 2s</span>');
+                window.__dx_audio__.checkShizuku();
+            }
+        };
+
+        window.__dx_audio__.on(function(p) {
+            document.getElementById('am-music').textContent = p.isMusicActive ? 'YES' : 'no';
+            document.getElementById('am-vol').textContent = (p.volumes?.music?.current ?? '?') + '/' + (p.volumes?.music?.max ?? '?');
+            
+            const fsDiv = document.getElementById('focus-stack');
+            if (p.focusStack && p.focusStack.length > 0) {
+                fsDiv.innerHTML = p.focusStack.map(f => `
+                    <div class="focus-item">
+                        <span class="pkg">${f.package}</span>
+                        <span class="gain">${f.gain || '?'}</span>
+                    </div>
+                `).join('');
+            } else {
+                fsDiv.innerHTML = '<div style="color: #888; font-size: 11px;">[Vazio - Nenhum app com foco]</div>';
+            }
+
+            logEvent(new Date(p.timestamp).toLocaleTimeString('pt-BR') + ' | m=' + p.isMusicActive + ' fs=' + (p.focusStack?.length || 0));
+        });
+
+        // Check Shizuku on load
+        window.addEventListener('load', () => window.__dx_audio__.checkShizuku());
     </script>
 </body>
 </html>

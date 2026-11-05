@@ -22,12 +22,18 @@ def save_last_ip(ip: str):
     cfg["last_ip"] = ip
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
+def save_last_endpoint(ip: str, port: str | None = None):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cfg = load_config()
+    cfg["last_ip"] = ip
+    if port:
+        cfg["last_port"] = port
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
 def load_config() -> dict:
     if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        try: return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except: pass
     return {}
 
 def run_adb(args: List[str]) -> subprocess.CompletedProcess:
@@ -45,24 +51,29 @@ def pair_device(ip_port: str, code: str) -> Tuple[bool, str]:
     return success, out
 
 def connect_device(target: str) -> Tuple[bool, str]:
-    """Conecta ao serviço principal de depuração Wi-Fi do celular."""
     cfg = load_config()
     last_ip = cfg.get("last_ip", "192.168.18.105")
+    last_port = cfg.get("last_port", "5555")
 
-    # Tratamento de atalhos de porta
+    target = target.strip()
+
+    # Validação amigável contra código de pareamento de 6 dígitos
+    if target.isdigit() and len(target) == 6:
+        return False, f"'{target}' tem 6 dígitos (código de pareamento). Para parear, use: sysutils android pair <IP:PORTA> {target}"
+
     if target.isdigit():
         target = f"{last_ip}:{target}"
     elif target.startswith(":"):
         target = f"{last_ip}{target}"
     elif ":" not in target:
-        target = f"{target}:5555"
-
-    if ":" in target and not target.startswith(":"):
-        save_last_ip(target.split(":")[0])
+        target = f"{target}:{last_port}"
 
     res = run_adb(["connect", target])
     out = res.stdout.strip() or res.stderr.strip()
     success = "connected to" in out.lower()
+    if success:
+        parts = target.split(":")
+        save_last_endpoint(parts[0], parts[1] if len(parts) > 1 else None)
     return success, out
 
 def get_connected_devices() -> List[str]:
@@ -112,3 +123,78 @@ def scan_and_auto_connect(ip: str | None = None) -> Tuple[bool, str]:
             return True, f"Conectado com sucesso em {target_ip}:{p}!"
 
     return False, "Portas localizadas, mas o celular recusou a conexão."
+
+# ─────────────────────────────────────────────────────────────────────
+# Audio Focus helpers (RIT-A / RIT-B)
+# ─────────────────────────────────────────────────────────────────────
+
+def get_appop(
+    device_target: str,
+    package: str,
+    op: str,
+) -> Tuple[bool, str]:
+    """
+    Executa 'adb -s <target> shell appops get <pkg> <op>'.
+    Retorna (sucesso, valor_atual).
+    Saída típica: 'TAKE_AUDIO_FOCUS: ignore'
+    """
+    res = run_adb(["-s", device_target, "shell", "appops", "get", package, op])
+    out = (res.stdout.strip() or res.stderr.strip())
+    success = res.returncode == 0
+    return success, out
+
+
+def dumpsys_audio(
+    device_target: str,
+) -> Tuple[bool, str]:
+    """
+    Executa 'adb -s <target> shell dumpsys audio'.
+    Retorna (sucesso, texto_completo).
+    """
+    res = run_adb(["-s", device_target, "shell", "dumpsys", "audio"])
+    out = (res.stdout or res.stderr or "")
+    success = res.returncode == 0 and len(out) > 100
+    return success, out
+
+
+def list_packages_matching(
+    device_target: str,
+    needle: str,
+) -> List[str]:
+    """
+    Lista pacotes instalados cujo nome contém 'needle' (case-insensitive).
+    Útil para o usuário descobrir o nome exato de um app de música.
+    """
+    res = run_adb(["-s", device_target, "shell", "pm", "list", "packages"])
+    if res.returncode != 0:
+        return []
+    needle_lc = needle.lower()
+    matches: List[str] = []
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("package:"):
+            continue
+        pkg = line[len("package:"):].strip()
+        if needle_lc in pkg.lower():
+            matches.append(pkg)
+    return sorted(matches)
+
+def set_appop(
+    device_target: str,
+    package: str,
+    op: str,
+    mode: str,
+) -> Tuple[bool, str]:
+    """
+    Executa 'adb -s <target> shell appops set <pkg> <op> <mode>'.
+    Retorna (sucesso, saída_bruta).
+    """
+    # Sanitização: só o primeiro token (corta 'time=...', 'rejecttime=...')
+    mode = (mode or "").strip().split(";")[0].strip().lower()
+    if mode not in ("allow", "ignore", "deny", "default"):
+        return False, f"Valor inválido para appops: {mode!r}"
+
+    res = run_adb(["-s", device_target, "shell", "appops", "set", package, op, mode])
+    out = (res.stdout.strip() or res.stderr.strip())
+    success = res.returncode == 0 and "error" not in out.lower()
+    return success, out

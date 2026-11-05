@@ -16,37 +16,46 @@ def generate_conf_content(
         "left":  ("left", "right"),
         "above": ("up", "down"),
         "below": ("down", "up")
+    }def generate_conf_content(
+    server_name: str,
+    client_name: str,
+    position: str = "right",
+    on_battery: bool = False
+) -> str:
+    dir_map = {
+        "right": ("right", "left"),
+        "left":  ("left", "right"),
+        "above": ("up", "down"),
+        "below": ("down", "up")
     }
     dir_server_to_client, dir_client_to_server = dir_map.get(position, ("right", "left"))
-
-    # Configuração com Aliases: aceita 'bluebaby' e 'DESKTOP-5NP5BHE' para a mesma tela
-    conf = f"""# ==============================================================================
-# LEAP SYS CONFIGURATION FILE (Aliases Nativos)
-# ==============================================================================
-
+    
+    # Otimização: Se estiver na bateria, aumenta o heartbeat para 15s (menos pacotes de rede)
+    # e desliga o clipboard sharing para economizar CPU.
+    heartbeat = "15000" if on_battery else "5000"
+    clipboard = "false" if on_battery else "true"
+    
+    conf = f"""
 section: screens
 \t{server_name}:
-\tbluebaby:
+\t{client_name}:
 end
-
 section: aliases
-\tbluebaby:
+\t{client_name}:
 \t\tDESKTOP-5NP5BHE
 end
-
 section: links
 \t{server_name}:
-\t\t{dir_server_to_client} = bluebaby
-\tbluebaby:
+\t\t{dir_server_to_client} = {client_name}
+\t{client_name}:
 \t\t{dir_client_to_server} = {server_name}
 end
-
 section: options
-\theartbeat = 5000
+\theartbeat = {heartbeat}
 \trelativeMouseMoves = false
 \tscreenSaverSync = true
 \twin32KeepForeground = false
-\tclipboardSharing = true
+\tclipboardSharing = {clipboard}
 \tswitchDelay = 250
 end
 """

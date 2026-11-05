@@ -8,9 +8,12 @@ if os.path.exists(_b):
 
 # [VULCAN-SKIP] Proteção contra introspecção Click
 # sysdiag/cli/commands.py
+
 import click
 import subprocess
-
+import sys
+import time
+from pathlib import Path
 from sysdiag.core import os_optimizer
 from sysdiag.platform.windows import registry_tweaks
 from utils.doxcolors import colors, NexusUI
@@ -106,3 +109,72 @@ def maintenance():
     click.echo("\n" + "="*60)
     click.echo(NexusUI.gradient_text("MANUTENÇÃO DE SISTEMA CONCLUÍDA"))
     click.echo("="*60)
+
+
+# ... (outros comandos do arquivo) ...
+
+@cli.command("drivers")
+@click.option("--update", is_flag=True, help="Atualiza os drivers via Dell Command Update.")
+def cmd_drivers(update: bool):
+    """Verifica e atualiza drivers de rede e chipset usando ferramentas OEM."""
+    from sysdiag.core import driver_updater
+    click.secho("\n--- ATUALIZAÇÃO DE DRIVERS (SYSUTILS) ---", fg="cyan", bold=True)
+
+    if update:
+        click.secho("[*] Iniciando atualização via ferramenta OEM...", fg="yellow")
+        click.echo("    (Aguarde. O progresso aparecerá abaixo)\n")
+
+        # Spinner manual usando \r (retorno de carro) para não quebrar a linha
+        def log_callback(line: str):
+            display_line = line[:75] + "..." if len(line) > 75 else line
+            sys.stdout.write(f"\r\033[K ⚙️  {display_line}")
+            sys.stdout.flush()
+
+        logs = driver_updater.run_dell_update(log_callback)
+        
+        # Limpa a linha do spinner antes de imprimir o resultado final
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+        click.echo("\n--- RESUMO DO LOG ---")
+        for log in logs:
+            cor = "green" if "[OK]" in log else "red" if "[ERRO]" in log else "white"
+            click.secho(f"  {log}", fg=cor)
+
+        click.secho("\n💡 Reinicie o computador após a atualização.", fg="green", bold=True)
+    else:
+        if driver_updater.check_dell_command_update():
+            click.secho("  ✔ Dell Command Update instalado e pronto.", fg="green")
+            click.secho("  💡 Execute com '--update' para aplicar.", fg="yellow")
+        else:
+            click.secho("  ⚠ Dell Command Update não encontrado.", fg="red")
+            click.secho("  💡 Execute com '--update' para instalá-lo automaticamente.", fg="yellow")
+
+@cli.command("s0report")
+def cmd_s0report():
+    """Gera o relatório de Modern Standby (S0) e extrai os Top Offenders."""
+    from energy_sys.core import report_parser
+
+    click.secho("\n--- GERANDO RELATÓRIO DE MODERN STANDBY (S0) ---", fg="cyan", bold=True)
+    out_path = Path("data/energy_reports/s0_report.html")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    click.secho("[*] Solicitando relatório ao Windows...", fg="yellow")
+    cmd = f'powercfg /systempowerreport /output "{out_path}"'
+    subprocess.run(cmd, shell=True, capture_output=True)
+
+    if not out_path.exists():
+        click.secho("✘ Falha ao gerar o relatório.", fg="red")
+        return
+
+    click.secho(f"✔ Relatório gerado em: {out_path}", fg="green")
+    click.secho("\n[*] Analisando culpados do S0...", fg="cyan")
+
+    results = report_parser.parse_powercfg_report(out_path)
+    if not results:
+        click.secho("⚠ Nenhum culpado encontrado.", fg="yellow")
+        return
+
+    for r in results[:10]:
+        color = "red" if r["is_known_culprit"] else "yellow"
+        click.secho(f"  {r['percent_str']:>8} | {r['name']}", fg=color)

@@ -3,7 +3,15 @@ from __future__ import annotations
 import click
 from pathlib import Path
 from energy_sys.platform.windows import win_power
-from energy_sys.core import power_estimator, process_impact, cost_calculator, power_strategies
+from energy_sys.core import (
+    power_estimator,
+    process_impact,
+    cost_calculator, 
+    power_strategies, 
+    services_impact, 
+    scheduled_tasks,
+    report_parser
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "data" / "energy_reports"
@@ -268,4 +276,250 @@ def cmd_cpu():
         click.echo(f"    Thread {idx:>2} {tag:<28} : [{bar}] {load:>5.1f}%")
     click.echo("--------------------------------------------------\n")
 
+@cli.command("audit")
+@click.option("--duration", default=60, show_default=True, help="Duração do trace do powercfg /energy.")
+def cmd_audit(duration: int):
+    """Executa uma auditoria completa de energia (powercfg, serviços, tarefas)."""
+    click.secho("\n--- AUDITORIA PROFUNDA DE ENERGIA (ENERGY SYS) ---", fg="cyan", bold=True)
 
+    # 1. Powercfg /energy
+    click.secho("\n[*] Executando 'powercfg /energy'...", fg="cyan")
+    report_path = PROJECT_ROOT / "data" / "energy_reports" / "energy-report.html"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = f'powercfg /energy /duration {duration} /output "{report_path}"'
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if res.returncode == 0:
+            click.secho(f"  ✔ Relatório de energia gerado: {report_path}", fg="green")
+            click.echo(f"  💡 Abra o arquivo para ver os erros detalhados.")
+        else:
+            click.secho(f"  ✘ Falha ao gerar o relatório de energia.", fg="red")
+    except Exception as e:
+        click.secho(f"  ✘ Erro ao executar powercfg: {e}", fg="red")
+
+    # 2. Serviços
+    click.secho("\n[*] Auditando serviços em execução...", fg="cyan")
+    try:
+        service_report = services_impact.audit_service_impact()
+        hogs = [s for s in service_report if s["is_known_power_hog"]]
+        if hogs:
+            click.secho(f"  ⚠ {len(hogs)} serviço(s) conhecidos por consumir bateria estão ativos:", fg="yellow")
+            for s in hogs:
+                click.echo(f"    • {s['display_name']} ({s['name']})")
+                click.echo(f"      Recomendação: {s['recommendation']}")
+        else:
+            click.secho("  ✔ Nenhum serviço conhecido por alto consumo está ativo.", fg="green")
+    except Exception as e:
+        click.secho(f"  ✘ Erro ao auditar serviços: {e}", fg="red")
+
+    # 3. Tarefas Agendadas
+    click.secho("\n[*] Verificando tarefas agendadas...", fg="cyan")
+    try:
+        tasks_summary = scheduled_tasks.get_active_tasks_summary()
+        click.echo(f"  • Tarefas ativas: {tasks_summary.get('TotalActive', 0)}")
+        wake_tasks = tasks_summary.get('WakeToRunCount', 0)
+        if wake_tasks > 0:
+            click.secho(f"  ⚠ {wake_tasks} tarefa(s) podem acordar o PC.", fg="yellow")
+            details = scheduled_tasks.get_wake_enabled_tasks()
+            for t in details[:5]:
+                click.echo(f"    • {t.get('TaskPath', '')}{t.get('TaskName', '')}")
+        else:
+            click.secho("  ✔ Nenhuma tarefa agendada está configurada para acordar o PC.", fg="green")
+    except Exception as e:
+        click.secho(f"  ✘ Erro ao auditar tarefas agendadas: {e}", fg="red")
+
+    click.echo("\n" + "="*60 + "\n")
+
+    # click.secho("\n[*] Analisando Relatório Gerado...", fg="cyan")
+    # try:
+    #     from energy_sys.core import report_parser
+    #     results = report_parser.parse_powercfg_report(report_path)
+    #     if results:
+    #         click.echo(f"  • Top consumidor: {results[0]['name']} ({results[0]['percent_str']})")
+    #         # ... (pode imprimir os top 3 aqui)
+    # except Exception:
+    #     pass
+
+@cli.command("services")
+def cmd_services():
+    """Lista serviços ativos e sinaliza os que podem ser desativados para economizar bateria."""
+    click.secho("\n--- AUDITORIA DE SERVIÇOS DO WINDOWS ---", fg="cyan", bold=True)
+    report = services_impact.audit_service_impact()
+    if not report:
+        click.echo("Nenhum serviço em execução detectado.")
+        return
+    click.echo(f"  {'STATUS':<12} | {'TIPO DE INÍCIO':<18} | SERVIÇO")
+    click.echo("  " + "-" * 70)
+    for s in report:
+        if s["is_known_power_hog"]:
+            status = click.style("⚠ ATIVO", fg="yellow", bold=True)
+        else:
+            status = click.style("  ok  ", fg="green")
+        start_type = s.get("start_type", "unknown").split(".")[-1].upper()
+        click.echo(f"  {status:<20} | {start_type:<18} | {s['display_name']} ({s['name']})")
+    click.echo("  " + "-" * 70)
+    click.secho("\n💡 Serviços com '⚠ ATIVO' são candidatos à desativação se você não usar a funcionalidade correspondente.", fg="yellow")
+    click.echo("   Para desativar: services.msc > localize o serviço > Pare > Tipo de inicialização: Desativado.\n")
+
+@cli.command("analyze")
+@click.argument("report_file", type=click.Path(exists=True, dir_okay=False), required=False)
+def cmd_analyze(report_file: str | None):
+    """
+    Analisa um relatório HTML do powercfg (/energy ou /sleepstudy) e extrai os culpados.
+    Se nenhum arquivo for passado, tenta ler os relatórios padrão na pasta data.
+    """
+    click.secho("\n--- ANALISADOR DE RELATÓRIOS POWERCFG ---", fg="cyan", bold=True)
+    
+    target_file = None
+    if report_file:
+        target_file = Path(report_file)
+    else:
+        # Tenta achar os relatórios padrão
+        default_energy = PROJECT_ROOT / "data" / "energy_reports" / "energy-report.html"
+        user_home = Path.home()
+        sleep_study = user_home / "Desktop" / "sleepstudy.html"
+        
+        if default_energy.exists():
+            target_file = default_energy
+        elif sleep_study.exists():
+            target_file = sleep_study
+        else:
+            click.secho("✘ Nenhum relatório fornecido e nenhum relatório padrão encontrado.", fg="red")
+            click.echo("Use: sysutils energy analyze caminho/para/relatorio.html")
+            return
+
+    click.echo(f"[*] Analisando arquivo: {target_file.name}")
+    results = report_parser.parse_powercfg_report(target_file)
+    
+    if not results:
+        click.secho("  ⚠ Nenhum dado de consumo de energia encontrado no arquivo. (É um HTML do powercfg?)", fg="yellow")
+        return
+
+    click.secho("\n  TOP CONSUMIDORES DE ENERGIA:", fg="white", bold=True)
+    click.echo(f"  {'%':>8} | {'TIPO':<15} | {'NOME':<40}")
+    click.echo("  " + "-" * 68)
+    
+    for r in results:
+        # Destaca os suspeitos conhecidos
+        if r["is_known_culprit"]:
+            color = "red"
+            icon = "🚨"
+        elif r["percent"] > 5.0:
+            color = "yellow"
+            icon = "⚠️"
+        else:
+            color = "green"
+            icon = "  "
+
+        name_str = f"{icon} {r['name']}"
+        
+        # Se o nome já tiver sido limpo, o click.style aplica a cor corretamente
+        click.echo(
+            f"  {r['percent_str']:>8} | "
+            f"{r['type']:<15} | "
+            f"{click.style(name_str, fg=color)}"
+        )
+        
+        if r["is_known_culprit"]:
+            click.echo(f"           └─ 🚨 ALVO CONHECIDO: {report_parser.KNOWN_CULPRITS[r['name'].split('.')[0] + '.exe'] if r['name'].split('.')[0] + '.exe' in report_parser.KNOWN_CULPRITS else 'Processo de alto consumo'}")
+
+    click.echo("  " + "-" * 68)
+    click.secho("\n💡 Dica: Processos em vermelho são os 'suspeitos de sempre' (Copilot, IPF, etc).", fg="yellow")
+    click.echo("   Tente desativar os serviços associados ou agendar a tarefa para rodar apenas na tomada.")
+
+@cli.command("blockers")
+def cmd_blockers():
+    """Mostra o que está impedindo o Windows de dormir (sleep requests)."""
+    from energy_sys.core.report_parser import find_sleep_blockers
+    click.secho("\n--- O QUE ESTÁ IMPEDINDO O SONO DO WINDOWS? ---", fg="cyan", bold=True)
+    blockers = find_sleep_blockers()
+    if not blockers:
+        click.secho("  ✔ Nenhum bloqueio ativo. O Windows pode dormir.", fg="green")
+    else:
+        for b in blockers:
+            click.secho(f"  🚨 {b}", fg="red")
+    click.secho("\n💡 Dica: Se o Spotify aparecer aqui, execute 'taskkill /F /IM Spotify.exe' como Administrador.", fg="yellow")
+
+@cli.command("events")
+@click.option("--limit", default=10, show_default=True, help="Número de eventos a listar.")
+def cmd_events(limit: int):
+    """Mostra os últimos eventos de energia (Kernel-Power) do Windows."""
+    click.secho("\n--- HISTÓRICO DE ENERGIA (KERNEL-POWER) ---", fg="cyan", bold=True)
+    
+    # Corrigido: Formata a data no PowerShell ANTES de converter para JSON
+    ps_cmd = (
+        f"Get-WinEvent -LogName System | Where-Object {{ $_.Id -in 42, 107, 131 }} | "
+        f"Select-Object -First {limit} @{{Name='Time';Expression={{$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')}}}}, Id, @{{Name='Message';Expression={{$_.Message -replace '\\r?\\n', ' '}}}} | "
+        f"ConvertTo-Json -Compress"
+    )
+    
+    try:
+        import subprocess, json
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=20)
+        if not res.stdout.strip():
+            click.secho("Nenhum evento encontrado.", fg="yellow")
+            return
+            
+        events = json.loads(res.stdout)
+        if isinstance(events, dict): events = [events]
+        
+        for e in events:
+            time_str = e.get("Time", "")
+            ev_id = e.get("Id")
+            msg = e.get("Message", "")
+            
+            if ev_id == 42:
+                click.secho(f"  💤 [{time_str}] SUSPENSOU (ID 42)", fg="blue")
+            elif ev_id == 107:
+                click.secho(f"  ⏰ [{time_str}] ACORDOU (ID 107)", fg="green")
+            elif ev_id == 131:
+                click.secho(f"  🚨 [{time_str}] BLOQUEIO (ID 131)", fg="red")
+                click.echo(f"       {msg[:200]}...")
+                
+    except Exception as e:
+        click.secho(f"[ERRO] Falha ao ler eventos: {e}", fg="red")
+
+@cli.command("lastwake")
+def cmd_lastwake():
+    """Mostra qual dispositivo ou software acordou o PC pela última vez."""
+    import subprocess
+    click.secho("\n--- O QUE ACORDOU O PC PELA ÚLTIMA VEZ? ---", fg="cyan", bold=True)
+    try:
+        res = subprocess.run(["powercfg", "/lastwake"], capture_output=True, text=True, encoding="cp850", errors="ignore")
+        # Limpa linhas vazias
+        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+        for line in lines:
+            if "Wake History Count" in line:
+                click.secho(f"  {line}", fg="white", bold=True)
+            elif "Type" in line or "Instance" in line or "Friendly Name" in line:
+                click.echo(f"    {line}")
+            else:
+                click.echo(f"  {line}")
+    except Exception as e:
+        click.secho(f"[ERRO] {e}", fg="red")
+
+@cli.command("kill-spotify")
+def cmd_kill_spotify():
+    """Força a parada de qualquer processo do Spotify (inclusive de outros usuários)."""
+    import subprocess
+    click.secho("\n[*] Caçando processos do Spotify...", fg="cyan")
+    try:
+        # Lista todos os processos do Spotify com seus PIDs
+        res = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Spotify.exe", "/FO", "CSV", "/NH"], capture_output=True, text=True)
+        if "Spotify.exe" not in res.stdout:
+            click.secho("  ✔ Nenhum Spotify rodando.", fg="green")
+            return
+            
+        # Extrai PIDs e mata
+        import csv, io
+        reader = csv.reader(io.StringIO(res.stdout))
+        pids = [row[1] for row in reader if len(row) > 1]
+        
+        for pid in pids:
+            click.echo(f"  • Matando PID {pid}...", nl=False)
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+            click.secho(" OK", fg="green")
+            
+        click.secho("\n✔ Todos os processos do Spotify foram encerrados.", fg="green", bold=True)
+    except Exception as e:
+        click.secho(f"[ERRO] {e}", fg="red")

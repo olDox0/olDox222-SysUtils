@@ -3,6 +3,7 @@
 # Ferramentas de Build (para suporte a setup/editable)
 # Hardware & Telemetria
 # Motores de Compressão
+beautifulsoup4==4.15.0
 click>=8.1.0
 colorama>=0.4.6
 flask==3.1.3

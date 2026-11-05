@@ -358,15 +358,7 @@ def share_auto():
     remote_share = profile["remote_share_name"]
     unc_path = f"\\\\{remote_ip}\\{remote_share}"
 
-    # 1. AUTO-LIMPEZA DE FANTASMAS: Remove mapeamentos duplicados anteriores (X:, Y:, etc.)
-    cleaned = network_connect.cleanup_stale_mounts_for_unc(unc_path)
-    if cleaned:
-        click.echo(f"[*] Limpeza preventiva: removidas unidades antigas duplicadas ({', '.join(cleaned)}).")
-
-    # 2. SELEÇÃO DA LETRA PADRÃO (Z: como padrão único)
-    drive_letter = network_connect.get_preferred_drive_letter("Z:")
-
-    click.echo(f"[*] Conectando à pasta remota '{unc_path}' na unidade {drive_letter}...")
+    click.echo(f"\n[*] Conectando à pasta remota '{unc_path}' na unidade {drive_letter}...")
     success, msg = network_connect.mount_network_drive(
         unc_path=unc_path,
         drive_letter=drive_letter,
@@ -378,8 +370,10 @@ def share_auto():
 
     if success:
         click.secho(f"\n[SUCESSO] Conectado à outra máquina com sucesso!", fg="green", bold=True)
-        click.secho(f"👉 Abrindo unidade '{drive_letter}' no Windows Explorer...", fg="cyan")
+        click.secho(f"👉 Abrindo unidade '{drive_letter}' e pasta de rede no Windows Explorer...", fg="cyan")
         network_connect.open_in_explorer(drive_letter)
+        # Abre também o UNC direto caso o UAC demore a atualizar
+        network_connect.open_in_explorer(unc_path)
     else:
         click.secho(f"\n[AVISO] {msg}", fg="yellow")
         click.echo("[*] Abrindo acesso direto via UNC no Windows Explorer...")
@@ -387,68 +381,3 @@ def share_auto():
 
     click.secho("\n" + "=" * 65 + "\n", fg="cyan")
 
-@share_group.command("clean")
-@click.option("--all", "clean_all", is_flag=True, help="Remove todas as unidades de rede mapeadas.")
-def share_clean(clean_all):
-    """🧹 Remove mapeamentos de rede fantasmas ou desconectados (com X vermelho)."""
-    click.echo("[*] Executando faxina de conexões de rede do Windows...")
-    cmd = ["net", "use", "*", "/DELETE", "/YES"] if clean_all else ["net", "use"]
-    
-    proc = subprocess.run(["net", "use", "*", "/DELETE", "/YES"], capture_output=True, text=True, errors="replace")
-    if proc.returncode == 0:
-        click.secho("[OK] Todas as unidades de rede fantasmas foram removidas com sucesso!", fg="green", bold=True)
-        click.echo("👉 Agora execute 'sysutils share auto' para montar apenas a unidade oficial.")
-    else:
-        click.secho(f"[AVISO] {proc.stderr or proc.stdout}", fg="yellow")
-
-@cli.group("android")
-def android_group():
-    """🤖 Subsistema de Conexão e Troca de Arquivos com Android (Tailscale)."""
-    pass
-
-
-@android_group.command("web")
-@click.option("--port", "-p", default=8080, show_default=True, help="Porta HTTP do servidor móvel.")
-def android_web(port):
-    """Inicia o Micro Hub Web para upload e download via navegador do celular."""
-    from syncdiag.core import android_hub
-    click.secho("\n=======================================================", fg="cyan")
-    click.secho(" 📱 SYNCDIAG ANDROID WEB HUB (TAILSCALE STAGING)", fg="cyan", bold=True)
-    click.secho("=======================================================\n", fg="cyan")
-    try:
-        android_hub.run_micro_hub(requested_port=port)
-    except KeyboardInterrupt:
-        click.secho("\n[PARADO] Servidor Android Hub encerrado.", fg="yellow")
-
-
-@android_group.command("send")
-@click.argument("filepath", type=click.Path(exists=True))
-@click.option("--target", default="android", help="Nome do dispositivo no Tailscale.")
-def android_send(filepath, target):
-    """Envia um arquivo para o Android via Taildrop P2P instantâneo."""
-    import subprocess
-    click.echo(f"[*] Despachando '{filepath}' para o dispositivo '{target}' via Taildrop...")
-    cmd = ["tailscale", "file", "cp", filepath, f"{target}:"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode == 0:
-        click.secho(f"[OK] Arquivo enviado com sucesso para '{target}'!", fg="green", bold=True)
-    else:
-        click.secho(f"[ERRO] Falha no envio: {proc.stderr or proc.stdout}", fg="red")
-
-
-@android_group.command("smb-card")
-def android_smb_card():
-    """Gera o cartão de conexão SMB para cadastrar no gerenciador do celular."""
-    from syncdiag.core import android_hub, network_connect
-    station_key, profile = network_connect.identify_current_station()
-    ip = android_hub.get_tailscale_ip()
-    
-    click.secho("\n--- DADOS DE CONEXÃO SMB PARA O CELULAR ---", fg="cyan", bold=True)
-    click.echo(f"  • Servidor / Host : {click.style(str(ip), fg='green', bold=True)}")
-    click.echo(f"  • Pasta / Share   : {click.style(profile['local_share_name'], fg='yellow', bold=True)}")
-    click.echo(f"  • Caminho Completo: smb://{ip}/{profile['local_share_name']}")
-    click.echo(f"  • Usuário         : (seu usuário Windows local)")
-    click.echo(f"  • Senha           : (sua senha cadastrada)")
-    click.secho("-------------------------------------------\n", fg="cyan")
-
-share_group.add_command(android_group, "android")
