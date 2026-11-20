@@ -88,6 +88,7 @@ class SysUtilsLazyGroup(click.Group):
             'energy': 'energy_sys.cli.cmd_energy:cli',
             'android': 'android_sys.cli.cmd_android:cli',
             'audio': 'android_sys.cli.cmd_android:audio_group',
+            'view':   'view_sys.cmd_view:cli',
         }
         # ═══ COMANDOS DOXOADE PORTADOS (PRIORIDADE SECUNDÁRIA) ═══
         self._ported_map = self._load_ported_commands()
