@@ -1,17 +1,23 @@
 # energy_sys/cli/cmd_energy.py
 from __future__ import annotations
 import click
+import subprocess
+import time
+import json
+import winreg
 from pathlib import Path
 from energy_sys.platform.windows import win_power
 from energy_sys.core import (
     power_estimator,
     process_impact,
-    cost_calculator, 
-    power_strategies, 
-    services_impact, 
+    cost_calculator,
+    power_strategies,
+    services_impact,
     scheduled_tasks,
-    report_parser
+    report_parser,
+    system_tweaks
 )
+from energy_sys.core import program_analyzer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "data" / "energy_reports"
@@ -54,8 +60,12 @@ def cmd_status(tariff: float | None):
     
     click.echo(f"\n  Consumo Instantâneo  : {click.style(f'{watts:.2f} W', fg='yellow', bold=True)}")
     click.echo(f"  Método de Leitura    : {reading['method']}")
+    
+    # ADICIONE ESTA LINHA:
+    if "accuracy" in reading:
+        cor_acc = "green" if "ALTA" in reading["accuracy"] else "yellow"
+        click.echo(f"  Precisão da Leitura  : {click.style(reading['accuracy'], fg=cor_acc)}")
 
-    # Cálculo de Autonomia Dinâmica Real para Bateria
     wmi_data = reading.get("details")
     if p_status and p_status['has_battery'] and not p_status['ac_connected'] and watts > 0:
         rem_mwh = (wmi_data or {}).get("remaining_mwh")
@@ -77,8 +87,26 @@ def cmd_status(tariff: float | None):
 @cli.command("top")
 @click.option("--limit", default=8, show_default=True, help="Quantidade de itens a listar.")
 @click.option("--raw", is_flag=True, help="Exibe processos isolados por PID em vez de agrupar.")
-def cmd_top(limit: int, raw: bool):
+@click.option("--monitor", is_flag=True, help="Monitora o consumo em tempo real (Ctrl+C para parar).")
+def cmd_top(limit: int, raw: bool, monitor: bool):
     """Lista os processos ou aplicativos que mais drenam energia."""
+    if monitor:
+        click.secho("\n--- MONITOR DE CPU EM TEMPO REAL (Ctrl+C para parar) ---", fg="cyan", bold=True)
+        try:
+            while True:
+                reading = power_estimator.estimate_instant_watts()
+                watts = reading["watts"]
+                consumers = process_impact.get_top_energy_consumers(limit=3, instant_watts=watts, aggregate=True)
+                
+                click.echo("\033[H\033[J", nl=False)
+                click.secho(f"⚡ Consumo Instantâneo: {watts:.2f} W", fg="yellow", bold=True)
+                for p in consumers:
+                    click.echo(f"  • {p['name']:<20} | CPU: {p['cpu_percent']:>5}% | Watts: {p['estimated_watts']:.2f}W")
+                time.sleep(3)
+        except KeyboardInterrupt:
+            click.secho("\n[PARADO] Monitor encerrado.", fg="yellow")
+        return
+
     reading = power_estimator.estimate_instant_watts()
     watts = reading["watts"]
     
@@ -94,11 +122,14 @@ def cmd_top(limit: int, raw: bool):
         click.echo(f"\n  {'INSTÂNCIAS':>10} | {'CPU% TOTAL':>10} | {'MEMÓRIA':>10} | {'WATTS EST.':>11} | APLICATIVO")
         click.echo("  " + "-" * 66)
         for p in consumers:
+            # Formatação segura dos Watts (sem f-string aninhada)
+            watts_str = f"{p['estimated_watts']:>9.2f} W"
+            watts_colored = click.style(watts_str, fg='yellow')
             click.echo(
                 f"  {p['instances']:>10} | "
                 f"{p['cpu_percent']:>9}% | "
                 f"{p['memory_mb']:>7} MB | "
-                f"{click.style(f'{p["estimated_watts"]:>9.2f} W', fg='yellow')} | "
+                f"{watts_colored} | "
                 f"{p['name']}"
             )
         click.echo("  " + "-" * 66 + "\n")
@@ -106,11 +137,13 @@ def cmd_top(limit: int, raw: bool):
         click.echo(f"\n  {'PID':>8} | {'CPU%':>6} | {'MEMÓRIA':>10} | {'WATTS EST.':>11} | PROCESSO")
         click.echo("  " + "-" * 62)
         for p in consumers:
+            watts_str = f"{p['estimated_watts']:>9.2f} W"
+            watts_colored = click.style(watts_str, fg='yellow')
             click.echo(
                 f"  {p['pid']:>8} | "
                 f"{p['cpu_percent']:>5}% | "
                 f"{p['memory_mb']:>7} MB | "
-                f"{click.style(f'{p["estimated_watts"]:>9.2f} W', fg='yellow')} | "
+                f"{watts_colored} | "
                 f"{p['name']}"
             )
         click.echo("  " + "-" * 62 + "\n")
@@ -169,7 +202,6 @@ def cmd_optimize(list_all: bool, enable_id: str | None, disable_id: str | None, 
         click.echo("👉 Como reverter:  sysutils energy optimize --rollback --apply\n")
         return
 
-    # MODO ROLLBACK BASELINE
     if rollback:
         click.secho("\n[ROLLBACK] Restaurando parâmetros para a linha de base original...", fg="yellow", bold=True)
         if not apply:
@@ -188,7 +220,6 @@ def cmd_optimize(list_all: bool, enable_id: str | None, disable_id: str | None, 
         click.secho("[SUCESSO] Sistema restaurado para os parâmetros de fábrica registrados no baseline!\n", fg="green", bold=True)
         return
 
-    # MODO ENABLE
     if enable_id:
         if enable_id not in power_strategies.STRATEGIES:
             click.secho(f"[ERRO] Estratégia '{enable_id}' não encontrada. Use --list para verificar os IDs.", fg="red")
@@ -219,7 +250,6 @@ def cmd_optimize(list_all: bool, enable_id: str | None, disable_id: str | None, 
         else:
             click.secho(f"\n✘ [FALHA] Não suportado pelo hardware ou ACPI desta máquina.", fg="red")
 
-    # MODO DISABLE
     if disable_id:
         if disable_id not in power_strategies.STRATEGIES:
             click.secho(f"[ERRO] Estratégia '{disable_id}' não encontrada.", fg="red")
@@ -257,7 +287,6 @@ def cmd_cpu():
     if cpu_info['max_mhz'] > 0:
         click.echo(f"  Clock Máximo   : {cpu_info['max_mhz']} MHz")
 
-    # Lê o teto ativo na bateria corrigido (sem o bug do 0%)
     limit_val = power_strategies.query_current_dc_value("SUB_PROCESSOR", "PROCTHROTTLEMAX")
     limit_str = f"{limit_val}%" if limit_val is not None else "100% (Padrão)"
     color = "green" if (limit_val is not None and limit_val < 100) else "white"
@@ -278,11 +307,12 @@ def cmd_cpu():
 
 @cli.command("audit")
 @click.option("--duration", default=60, show_default=True, help="Duração do trace do powercfg /energy.")
-def cmd_audit(duration: int):
+@click.option("--deep", is_flag=True, help="Executa auditoria profunda (S0, Intel DTT, Drivers).")
+def cmd_audit(duration: int, deep: bool):
     """Executa uma auditoria completa de energia (powercfg, serviços, tarefas)."""
     click.secho("\n--- AUDITORIA PROFUNDA DE ENERGIA (ENERGY SYS) ---", fg="cyan", bold=True)
 
-    # 1. Powercfg /energy
+    # 1. Powercfg /energy (normal)
     click.secho("\n[*] Executando 'powercfg /energy'...", fg="cyan")
     report_path = PROJECT_ROOT / "data" / "energy_reports" / "energy-report.html"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,8 +320,7 @@ def cmd_audit(duration: int):
     try:
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if res.returncode == 0:
-            click.secho(f"  ✔ Relatório de energia gerado: {report_path}", fg="green")
-            click.echo(f"  💡 Abra o arquivo para ver os erros detalhados.")
+            click.secho(f"  ✔ Relatório de energia gerado: {report_path.name}", fg="green")
         else:
             click.secho(f"  ✘ Falha ao gerar o relatório de energia.", fg="red")
     except Exception as e:
@@ -304,41 +333,43 @@ def cmd_audit(duration: int):
         hogs = [s for s in service_report if s["is_known_power_hog"]]
         if hogs:
             click.secho(f"  ⚠ {len(hogs)} serviço(s) conhecidos por consumir bateria estão ativos:", fg="yellow")
-            for s in hogs:
+            for s in hogs[:5]: # Limita a 5 para não poluir
                 click.echo(f"    • {s['display_name']} ({s['name']})")
-                click.echo(f"      Recomendação: {s['recommendation']}")
         else:
             click.secho("  ✔ Nenhum serviço conhecido por alto consumo está ativo.", fg="green")
     except Exception as e:
         click.secho(f"  ✘ Erro ao auditar serviços: {e}", fg="red")
 
-    # 3. Tarefas Agendadas
-    click.secho("\n[*] Verificando tarefas agendadas...", fg="cyan")
-    try:
-        tasks_summary = scheduled_tasks.get_active_tasks_summary()
-        click.echo(f"  • Tarefas ativas: {tasks_summary.get('TotalActive', 0)}")
-        wake_tasks = tasks_summary.get('WakeToRunCount', 0)
-        if wake_tasks > 0:
-            click.secho(f"  ⚠ {wake_tasks} tarefa(s) podem acordar o PC.", fg="yellow")
-            details = scheduled_tasks.get_wake_enabled_tasks()
-            for t in details[:5]:
-                click.echo(f"    • {t.get('TaskPath', '')}{t.get('TaskName', '')}")
+    if deep:
+        # 3. Intel DTT
+        click.secho("\n[*] Verificando Intel Dynamic Tuning / IPF...", fg="cyan")
+        dtt_info = system_tweaks.get_intel_dtt_version()
+        if dtt_info:
+            click.secho("  ✔ Driver Intel DTT/IPF encontrado:", fg="green")
+            for line in dtt_info.splitlines():
+                if line.strip():
+                    click.echo(f"    {line.strip()}")
         else:
-            click.secho("  ✔ Nenhuma tarefa agendada está configurada para acordar o PC.", fg="green")
-    except Exception as e:
-        click.secho(f"  ✘ Erro ao auditar tarefas agendadas: {e}", fg="red")
+            click.secho("  ⚠ Intel DTT/IPF não encontrado ou não instalado.", fg="yellow")
+            click.secho("    💡 Instale via Dell Command Update (sysutils win drivers --update).", fg="yellow")
+
+        # 4. S0 Report Automático
+        click.secho("\n[*] Gerando e analisando relatório de S0 (Modern Standby)...", fg="cyan")
+        s0_path = PROJECT_ROOT / "data" / "energy_reports" / "s0_report.html"
+        subprocess.run(f'powercfg /systempowerreport /output "{s0_path}"', shell=True, capture_output=True)
+        if s0_path.exists():
+            results = report_parser.parse_powercfg_report(s0_path)
+            if results:
+                click.secho("  🚨 Top 5 culpados do S0:", fg="red", bold=True)
+                for r in results[:5]:
+                    icon = "🚨" if r["is_known_culprit"] else "⚠️"
+                    color = "red" if r["is_known_culprit"] else "yellow"
+                    drain_str = f"({r['drain_mw']:.0f} mW)" if r.get("drain_mw") else ""
+                    click.secho(f"    {icon} {r['percent_str']:>6} | {r['name']} {drain_str}", fg=color)
+            else:
+                click.secho("  ✔ Nenhum culpado encontrado no S0.", fg="green")
 
     click.echo("\n" + "="*60 + "\n")
-
-    # click.secho("\n[*] Analisando Relatório Gerado...", fg="cyan")
-    # try:
-    #     from energy_sys.core import report_parser
-    #     results = report_parser.parse_powercfg_report(report_path)
-    #     if results:
-    #         click.echo(f"  • Top consumidor: {results[0]['name']} ({results[0]['percent_str']})")
-    #         # ... (pode imprimir os top 3 aqui)
-    # except Exception:
-    #     pass
 
 @cli.command("services")
 def cmd_services():
@@ -364,17 +395,13 @@ def cmd_services():
 @cli.command("analyze")
 @click.argument("report_file", type=click.Path(exists=True, dir_okay=False), required=False)
 def cmd_analyze(report_file: str | None):
-    """
-    Analisa um relatório HTML do powercfg (/energy ou /sleepstudy) e extrai os culpados.
-    Se nenhum arquivo for passado, tenta ler os relatórios padrão na pasta data.
-    """
+    """Analisa um relatório HTML do powercfg (/energy ou /sleepstudy) e extrai os culpados."""
     click.secho("\n--- ANALISADOR DE RELATÓRIOS POWERCFG ---", fg="cyan", bold=True)
     
     target_file = None
     if report_file:
         target_file = Path(report_file)
     else:
-        # Tenta achar os relatórios padrão
         default_energy = PROJECT_ROOT / "data" / "energy_reports" / "energy-report.html"
         user_home = Path.home()
         sleep_study = user_home / "Desktop" / "sleepstudy.html"
@@ -400,7 +427,6 @@ def cmd_analyze(report_file: str | None):
     click.echo("  " + "-" * 68)
     
     for r in results:
-        # Destaca os suspeitos conhecidos
         if r["is_known_culprit"]:
             color = "red"
             icon = "🚨"
@@ -413,7 +439,6 @@ def cmd_analyze(report_file: str | None):
 
         name_str = f"{icon} {r['name']}"
         
-        # Se o nome já tiver sido limpo, o click.style aplica a cor corretamente
         click.echo(
             f"  {r['percent_str']:>8} | "
             f"{r['type']:<15} | "
@@ -421,7 +446,7 @@ def cmd_analyze(report_file: str | None):
         )
         
         if r["is_known_culprit"]:
-            click.echo(f"           └─ 🚨 ALVO CONHECIDO: {report_parser.KNOWN_CULPRITS[r['name'].split('.')[0] + '.exe'] if r['name'].split('.')[0] + '.exe' in report_parser.KNOWN_CULPRITS else 'Processo de alto consumo'}")
+            click.echo(f"           └─ 🚨 ALVO CONHECIDO: {report_parser.KNOWN_CULPRITS.get(r['name'].split('.')[0] + '.exe', 'Processo de alto consumo')}")
 
     click.echo("  " + "-" * 68)
     click.secho("\n💡 Dica: Processos em vermelho são os 'suspeitos de sempre' (Copilot, IPF, etc).", fg="yellow")
@@ -446,7 +471,6 @@ def cmd_events(limit: int):
     """Mostra os últimos eventos de energia (Kernel-Power) do Windows."""
     click.secho("\n--- HISTÓRICO DE ENERGIA (KERNEL-POWER) ---", fg="cyan", bold=True)
     
-    # Corrigido: Formata a data no PowerShell ANTES de converter para JSON
     ps_cmd = (
         f"Get-WinEvent -LogName System | Where-Object {{ $_.Id -in 42, 107, 131 }} | "
         f"Select-Object -First {limit} @{{Name='Time';Expression={{$_.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')}}}}, Id, @{{Name='Message';Expression={{$_.Message -replace '\\r?\\n', ' '}}}} | "
@@ -454,7 +478,6 @@ def cmd_events(limit: int):
     )
     
     try:
-        import subprocess, json
         res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=20)
         if not res.stdout.strip():
             click.secho("Nenhum evento encontrado.", fg="yellow")
@@ -482,11 +505,9 @@ def cmd_events(limit: int):
 @cli.command("lastwake")
 def cmd_lastwake():
     """Mostra qual dispositivo ou software acordou o PC pela última vez."""
-    import subprocess
     click.secho("\n--- O QUE ACORDOU O PC PELA ÚLTIMA VEZ? ---", fg="cyan", bold=True)
     try:
         res = subprocess.run(["powercfg", "/lastwake"], capture_output=True, text=True, encoding="cp850", errors="ignore")
-        # Limpa linhas vazias
         lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
         for line in lines:
             if "Wake History Count" in line:
@@ -500,26 +521,359 @@ def cmd_lastwake():
 
 @cli.command("kill-spotify")
 def cmd_kill_spotify():
-    """Força a parada de qualquer processo do Spotify (inclusive de outros usuários)."""
-    import subprocess
-    click.secho("\n[*] Caçando processos do Spotify...", fg="cyan")
+    """Força a parada de QUALQUER processo do Spotify (inclusive de outros usuários)."""
+    click.secho("\n[*] Caçando processos do Spotify via PowerShell...", fg="cyan")
+    ps_cmd = "Get-Process -Name 'Spotify' -ErrorAction SilentlyContinue | Stop-Process -Force"
     try:
-        # Lista todos os processos do Spotify com seus PIDs
-        res = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Spotify.exe", "/FO", "CSV", "/NH"], capture_output=True, text=True)
-        if "Spotify.exe" not in res.stdout:
-            click.secho("  ✔ Nenhum Spotify rodando.", fg="green")
-            return
-            
-        # Extrai PIDs e mata
-        import csv, io
-        reader = csv.reader(io.StringIO(res.stdout))
-        pids = [row[1] for row in reader if len(row) > 1]
-        
-        for pid in pids:
-            click.echo(f"  • Matando PID {pid}...", nl=False)
-            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
-            click.secho(" OK", fg="green")
-            
-        click.secho("\n✔ Todos os processos do Spotify foram encerrados.", fg="green", bold=True)
+        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True)
+        click.secho("  ✔ Todos os processos do Spotify foram encerrados.", fg="green", bold=True)
     except Exception as e:
         click.secho(f"[ERRO] {e}", fg="red")
+
+
+@cli.command("programs")
+@click.option("--kill-pid", type=int, help="Mata um processo específico pelo PID.")
+def cmd_programs(kill_pid: int | None):
+    """Analisa startups e processos zumbis, com controle total para matar."""
+    click.secho("\n--- ANÁLISE DE PROGRAMAS & ZUMBIS ---", fg="cyan", bold=True)
+
+    if kill_pid:
+        click.secho(f"[*] Tentando matar o processo PID {kill_pid}...", fg="yellow")
+        if program_analyzer.kill_process_by_pid(kill_pid):
+            click.secho(f"✔ Processo {kill_pid} encerrado.", fg="green")
+        else:
+            click.secho(f"✘ Falha ao matar PID {kill_pid} (talvez precise de Admin).", fg="red")
+        return
+
+    click.secho("\n[*] Programas que iniciam com o Windows:", fg="cyan")
+    startups = program_analyzer.get_startup_programs()
+    if not startups:
+        click.secho("  (Nenhum detectado)", fg="yellow")
+    else:
+        for s in startups:
+            name = s.get("Name", "Desconhecido")
+            loc = s.get("Location", "").split("\\")[-1]
+            click.echo(f"  • {name:<35} [{loc}]")
+
+    click.secho("\n[*] Processos 'Zumbis' rodando agora:", fg="cyan")
+    zombies = program_analyzer.get_zombie_processes()
+    if not zombies:
+        click.secho("  ✔ Nenhum processo zumbi ativo.", fg="green")
+    else:
+        click.echo(f"  {'PID':>8} | {'CPU%':>6} | {'USUÁRIO':<25} | PROCESSO")
+        click.echo("  " + "-" * 60)
+        for z in zombies:
+            click.secho(
+                f"  {z['pid']:>8} | {z['cpu']:>5}% | {z['user']:<25} | {z['name']}",
+                fg="red"
+            )
+        click.secho("\n💡 Dica: Use 'sysutils energy programs --kill-pid <PID>' para matar um específico.", fg="yellow")
+
+@cli.group("startup")
+def startup_group():
+    """Gerencia os programas de inicialização do Windows."""
+    pass
+
+@startup_group.command("manage")
+def cmd_startup_manage():
+    """Modo interativo: pergunta item por item se deseja desativar."""
+    click.secho("\n--- GERENCIADOR INTERATIVO DE INICIALIZAÇÃO ---", fg="cyan", bold=True)
+    startups = program_analyzer.get_startup_programs()
+    
+    if not startups:
+        click.secho("Nenhum programa de inicialização encontrado.", fg="yellow")
+        return
+
+    click.echo("Pressione 's' para desativar, ou 'n' para manter.\n")
+    
+    for s in startups:
+        name = s.get("Name")
+        cmd = s.get("Command", "")
+        
+        click.secho(f"• {name}", fg="white", bold=True)
+        click.echo(f"  Comando: {cmd[:80]}...")
+        
+        if click.confirm("  Desativar este item?", default=False):
+            ok, msg = program_analyzer.disable_startup_item(name)
+            if ok:
+                click.secho(f"  ✔ {msg}", fg="green")
+            else:
+                click.secho(f"  ✘ {msg}", fg="red")
+        else:
+            click.echo("  ○ Mantido.")
+        click.echo()
+
+@startup_group.command("disable")
+@click.argument("name")
+def cmd_startup_disable(name: str):
+    """Desativa um programa de inicialização pelo nome exato."""
+    ok, msg = program_analyzer.disable_startup_item(name)
+    cor = "green" if ok else "red"
+    click.secho(f"\n[{ 'OK' if ok else 'FALHA' }] {msg}\n", fg=cor, bold=True)
+
+@cli.command("energy-report")
+def cmd_energy_report():
+    """Gera e analisa o powercfg /energy (bloqueios em tempo real e CPU)."""
+    click.secho("\n--- GERANDO RELATÓRIO DE ENERGIA (POWERCFG /ENERGY) ---", fg="cyan", bold=True)
+    out_path = Path("data/energy_reports/energy_report.html")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    click.secho("[*] Coletando dados por 60 segundos (não feche o terminal)...", fg="yellow")
+    subprocess.run(f'powercfg /energy /duration 60 /output "{out_path}"', shell=True, capture_output=True)
+    
+    if not out_path.exists():
+        click.secho("✘ Falha ao gerar relatório.", fg="red")
+        return
+        
+    results = report_parser.parse_energy_report(out_path)
+    if not results:
+        click.secho("✔ Nenhum problema de energia encontrado.", fg="green")
+        return
+        
+    click.secho("\n--- BLOQUEIOS E PROBLEMAS DETECTADOS ---", fg="cyan")
+    for r in results:
+        color = "red" if r["severity"] == "CRITICAL" else "yellow"
+        icon = "🚨" if r["severity"] == "CRITICAL" else "⚠️"
+        click.secho(f"  {icon} [{r['process']}] {r['title']}", fg=color, bold=True)
+        click.echo(f"      {r['description'][:100]}...")
+
+@cli.command("fix-startup")
+def cmd_fix_startup():
+    """Remove OneDrive, Tailscale e Firefox da inicialização (HKCU)."""
+    click.secho("\n--- REMOVENDO PROGRAMAS DA INICIALIZAÇÃO ---", fg="cyan", bold=True)
+    
+    targets = ["OneDrive", "Mozilla-Firefox-308046B0AF4A39CB", "Tailscale"]
+    
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
+        for t in targets:
+            try:
+                winreg.DeleteValue(key, t)
+                click.secho(f"  ✔ Removido: {t}", fg="green")
+            except FileNotFoundError:
+                click.secho(f"  ○ Já estava desativado: {t}", fg="yellow")
+        winreg.CloseKey(key)
+    except Exception as e:
+        click.secho(f"  ✘ Falha ao acessar o registro: {e}", fg="red")
+        
+    click.secho("\n💡 O Tailscale e o OneDrive podem ser iniciados manualmente quando necessário.", fg="yellow")
+
+@cli.command("s0report")
+def cmd_s0report():
+    """Gera o relatório de Modern Standby (S0) e extrai os Top Offenders detalhados."""
+    from energy_sys.core import report_parser
+    click.secho("\n--- GERANDO RELATÓRIO DE MODERN STANDBY (S0) ---", fg="cyan", bold=True)
+    out_path = Path("data/energy_reports/s0_report.html")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    click.secho("[*] Solicitando relatório ao Windows...", fg="yellow")
+    subprocess.run(f'powercfg /systempowerreport /output "{out_path}"', shell=True, capture_output=True)
+
+    if not out_path.exists():
+        click.secho("✘ Falha ao gerar o relatório.", fg="red")
+        return
+
+    click.secho(f"✔ Relatório gerado em: {out_path}", fg="green")
+    click.secho("\n[*] Analisando culpados do S0...", fg="cyan")
+
+    results = report_parser.parse_powercfg_report(out_path)
+    if not results:
+        click.secho("⚠ Nenhum culpado encontrado.", fg="yellow")
+        return
+
+    # Cabeçalho da tabela
+    click.secho(f"\n  {'% ATIVO':>8} | {'DRENO (mW)':>12} | {'TIPO':<10} | {'NOME':<35}", fg="white", bold=True)
+    click.echo("  " + "-" * 75)
+    
+    for r in results[:15]: # Top 15
+        color = "red" if r["is_known_culprit"] else "yellow"
+        icon = "🚨" if r["is_known_culprit"] else "⚠️"
+        
+        drain_str = f"{r['drain_mw']:.0f} mW" if r.get("drain_mw") is not None else "---"
+        
+        click.secho(
+            f"  {r['percent_str']:>8} | "
+            f"{drain_str:>12} | "
+            f"{r['type']:<10} | "
+            f"{icon} {r['name']}", 
+            fg=color
+        )
+        
+    click.echo("  " + "-" * 75)
+    click.secho("\n💡 Dica: O 'DRENO (mW)' mostra o consumo real em miliwatts de cada componente durante o sono.", fg="yellow")
+
+@cli.command("tweak")
+@click.option("--apply", is_flag=True, help="Aplica os ajustes de economia (requer Admin).")
+@click.option("--rollback", is_flag=True, help="Reverte os ajustes para o padrão.")
+@click.option("--list", "list_all", is_flag=True, help="Lista os ajustes disponíveis.")
+def cmd_tweak(apply: bool, rollback: bool, list_all: bool):
+    """Aplica ou reverte ajustes cirúrgicos de economia de energia na bateria."""
+    click.secho("\n--- AJUSTES DE ENERGIA (TWEAK) ---", fg="cyan", bold=True)
+    
+    if not system_tweaks.is_admin():
+        click.secho("⚠  Aviso: Alguns ajustes exigem privilégios de Administrador.", fg="yellow")
+
+    tweaks = {
+        "modern-standby": {
+            "name": "Desativar Rede no Modern Standby",
+            "desc": "Impede o Wi-Fi de drenar bateria quando o PC está fechado.",
+            "action": lambda disable: system_tweaks.apply_modern_standby_network(disable)
+        },
+        "fast-startup": {
+            "name": "Desativar Inicialização Rápida",
+            "desc": "Garante desligamento completo e evita drenos fantasmas.",
+            "action": lambda disable: system_tweaks.apply_fast_startup(disable)
+        },
+        "hybrid-cpu": {
+            "name": "Priorizar E-Cores na Bateria",
+            "desc": "Força o uso de núcleos de eficiência para economizar carga.",
+            "action": lambda disable: system_tweaks.apply_hybrid_cpu_policy(disable)
+        }
+    }
+
+    if list_all or (not apply and not rollback):
+        click.echo("\nAjustes disponíveis:")
+        for tid, t in tweaks.items():
+            click.echo(f"  • {click.style(tid, fg='cyan', bold=True)}: {t['name']}")
+            click.echo(f"    {t['desc']}")
+        click.echo("\n💡 Use 'sysutils energy tweak --apply' para ativar ou '--rollback' para reverter.\n")
+        return
+
+    if apply and rollback:
+        click.secho("[ERRO] Escolha --apply ou --rollback, não ambos.", fg="red")
+        return
+
+    is_disable = apply
+    mode_str = "APLICANDO" if apply else "REVERTENDO"
+    click.secho(f"\n[*] {mode_str} ajustes de economia...", fg="yellow", bold=True)
+    
+    for tid, t in tweaks.items():
+        ok, msg = t["action"](is_disable)
+        cor = "green" if ok else "red"
+        icon = "✔" if ok else "✘"
+        click.secho(f"  {icon} {t['name']}: {msg}", fg=cor)
+        
+    click.secho(f"\n💡 {'Reinicie o PC para aplicar as mudanças.' if apply else 'Configurações restauradas.'}", fg="green")
+
+
+@cli.group("hardware")
+def hardware_group():
+    """Gerencia a leitura real de hardware (Watts via LibreHardwareMonitor)."""
+    pass
+
+@hardware_group.command("install")
+def cmd_hw_install():
+    """Instala o pacote PyLibreHardwareMonitor via pip."""
+    click.secho("\n[*] Instalando PyLibreHardwareMonitor...", fg="cyan")
+    import sys
+    import subprocess
+    try:
+        # Roda silenciosamente o pip install
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "PyLibreHardwareMonitor"],
+            check=True
+        )
+        click.secho("✔ [OK] Biblioteca instalada com sucesso!", fg="green", bold=True)
+        click.secho("💡 Nota: Para ler os Watts reais, execute este terminal como Administrador.", fg="yellow")
+    except subprocess.CalledProcessError as e:
+        click.secho(f"✘ [FALHA] Erro ao instalar: {e}", fg="red", bold=True)
+
+@hardware_group.command("test")
+def cmd_hw_test():
+    """Testa a leitura de Watts reais do hardware."""
+    from energy_sys.core import hardware_monitor
+    click.secho("\n--- TESTE DE HARDWARE (RAPL) ---", fg="cyan", bold=True)
+    
+    click.secho("[*] Inicializando sensores...", fg="yellow")
+    watts = hardware_monitor.read_power()
+    
+    if watts is not None:
+        click.secho(f"✔ [OK] Leitura obtida com sucesso!", fg="green", bold=True)
+        click.secho(f"  • CPU Package Power: {watts:.2f} W", fg="white", bold=True)
+    else:
+        click.secho("✘ [FALHA] Não foi possível ler os Watts.", fg="red", bold=True)
+        click.echo("  • Motivos prováveis:")
+        click.echo("    1. A biblioteca PyLibreHardwareMonitor não está instalada.")
+        click.echo("    2. O terminal não está rodando como Administrador.")
+        click.echo("    3. O seu processador não expõe o sensor RAPL via .NET.")
+        click.echo("    dica, tente este\n      winget install --id namazso.PawnIO --exact --silent --accept-package-agreements --accept-source-agreements")
+
+@hardware_group.command("diag")
+def cmd_hw_diag():
+    """Exibe todos os hardwares e sensores detectados (Raio-X do sistema)."""
+    from energy_sys.core import hardware_monitor
+    click.secho("\n--- DIAGNÓSTICO COMPLETO DE HARDWARE ---", fg="cyan", bold=True)
+    
+    click.secho("[*] Lendo sensores...", fg="yellow")
+    hws = hardware_monitor.dump_diagnostic()
+    
+    if not hws:
+        click.secho("✘ Nenhum hardware detectado. (Verifique se está rodando como Admin).", fg="red")
+        return
+
+    for hw in hws:
+        click.secho(f"\n[Hardware] {hw['name']} ({hw['type']})", fg="green", bold=True)
+        for s in hw["sensors"]:
+            val = f"{s['value']:.2f}" if isinstance(s['value'], (int, float)) else str(s['value'])
+            color = "yellow" if s["type"] == "Power" else "white"
+            click.secho(f"  • {s['name']:<35} | {s['type']:<12} | {val}", fg=color)
+            
+    click.secho("\n💡 Dica: Sensores em amarelo são de Potência (Watts).", fg="cyan")
+
+@cli.command("doctor")
+def cmd_doctor():
+    """Diagnostica o ambiente para leitura real de hardware."""
+    from energy_sys.core import doctor
+    click.secho("\n--- DOUTOR DE HARDWARE (ENERGY SYS) ---", fg="cyan", bold=True)
+    
+    click.secho("[*] Executando checagens...", fg="yellow")
+    all_ok, logs = doctor.run_diagnostics()
+    
+    for log in logs:
+        color = "green" if log.startswith("✔") else "red"
+        click.secho(f"  {log}", fg=color)
+        
+    if all_ok:
+        click.secho("\n✔ [SAÚDE OK] Seu sistema está pronto para telemetria de hardware real.", fg="green", bold=True)
+    else:
+        click.secho("\n⚠ [AÇÃO NECESSÁRIA] Corrija os itens marcados com ✘ acima.", fg="yellow", bold=True)
+        click.echo("  Dica: Use 'sysutils energy hardware install' e 'sysutils energy hardware install-driver'.")
+    click.echo()
+
+@hardware_group.command("install-driver")
+def cmd_hw_install_driver():
+    """Instala o driver PawnIO via winget (necessário para leitura de sensores)."""
+    click.secho("\n[*] Instalando driver PawnIO...", fg="cyan")
+    cmd = [
+        "winget", "install", "--id", "namazso.PawnIO",
+        "--exact", "--silent",
+        "--accept-package-agreements", "--accept-source-agreements"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="cp850")
+        if res.returncode == 0:
+            click.secho("✔ [OK] PawnIO instalado com sucesso!", fg="green", bold=True)
+            click.secho("💡 Reinicie o PC se os sensores não responderem imediatamente.", fg="yellow")
+        else:
+            click.secho(f"✘ [FALHA] {res.stderr or res.stdout}", fg="red")
+    except Exception as e:
+        click.secho(f"✘ [ERRO] {e}", fg="red")
+
+@cli.command("pin")
+@click.argument("process_name")
+@click.option("--core-type", type=click.Choice(["e-cores", "p-cores", "all"]), default="e-cores", help="Tipo de núcleo para fixar o processo.")
+def cmd_pin(process_name: str, core_type: str):
+    """Força um processo a rodar apenas em núcleos específicos (Afinidade de CPU)."""
+    from energy_sys.core import process_tuner
+    click.secho(f"\n--- AFINIDADE DE CPU ---", fg="cyan", bold=True)
+    click.echo(f"[*] Fixando '{process_name}' nos {core_type.upper()}...")
+    
+    ok, msg, count = process_tuner.pin_process(process_name, core_type)
+    
+    if ok:
+        click.secho(f"✔ [OK] {msg}", fg="green", bold=True)
+        click.secho(f"  • {count} processo(s) afetado(s).", fg="white")
+        click.secho("\n💡 Dica: Reinicie o processo se ele não responder bem.", fg="yellow")
+        click.secho("   Use 'sysutils energy top --monitor' para ver o impacto nos Watts.", fg="cyan")
+    else:
+        click.secho(f"✘ [FALHA] {msg}", fg="red")

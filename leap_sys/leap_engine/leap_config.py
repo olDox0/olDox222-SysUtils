@@ -9,16 +9,6 @@ from pathlib import Path
 def generate_conf_content(
     server_name: str,
     client_name: str,
-    position: str = "right"
-) -> str:
-    dir_map = {
-        "right": ("right", "left"),
-        "left":  ("left", "right"),
-        "above": ("up", "down"),
-        "below": ("down", "up")
-    }def generate_conf_content(
-    server_name: str,
-    client_name: str,
     position: str = "right",
     on_battery: bool = False
 ) -> str:
@@ -30,13 +20,10 @@ def generate_conf_content(
     }
     dir_server_to_client, dir_client_to_server = dir_map.get(position, ("right", "left"))
     
-    # Otimização: Se estiver na bateria, aumenta o heartbeat para 15s (menos pacotes de rede)
-    # e desliga o clipboard sharing para economizar CPU.
     heartbeat = "15000" if on_battery else "5000"
     clipboard = "false" if on_battery else "true"
     
-    conf = f"""
-section: screens
+    conf = f"""section: screens
 \t{server_name}:
 \t{client_name}:
 end
@@ -65,10 +52,11 @@ def write_runtime_config(
     conf_dir: Path,
     server_name: str,
     client_name: str,
-    position: str = "right"
+    position: str = "right",
+    on_battery: bool = False
 ) -> Path:
     conf_dir.mkdir(parents=True, exist_ok=True)
     target_path = conf_dir / "leap_runtime.conf"
-    content = generate_conf_content(server_name, client_name, position)
+    content = generate_conf_content(server_name, client_name, position, on_battery)
     target_path.write_text(content, encoding="utf-8")
     return target_path

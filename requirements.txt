@@ -3,6 +3,7 @@
 # Ferramentas de Build (para suporte a setup/editable)
 # Hardware & Telemetria
 # Motores de Compressão
+PyLibreHardwareMonitor==1.2.2
 beautifulsoup4==4.15.0
 click>=8.1.0
 colorama>=0.4.6

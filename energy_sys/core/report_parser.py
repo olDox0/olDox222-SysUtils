@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
+from bs4 import BeautifulSoup
+
 KNOWN_CULPRITS = {
     "CopilotRuntimeBroker.exe": "Assistente Copilot (IA)",
     "ai_runtime.exe": "Runtime de IA do Windows",
@@ -82,47 +84,59 @@ def _walk_for_offenders(obj: Any, path: str = "") -> List[Dict]:
     """
     results = []
     if isinstance(obj, list):
-        # Verifica se esta lista é uma lista de offenders
         if obj and isinstance(obj[0], dict):
             sample = obj[0]
-            # Chaves típicas do sleepstudy
             has_name = any(k in sample for k in ("Name", "FriendlyName", "ProcessName"))
             has_percent = any(k in sample for k in ("ActiveTimePercent", "Percent", "DrainPercent", "Sw", "Hw"))
+            
             if has_name and has_percent and len(obj) >= 1:
                 for item in obj:
                     name = item.get("Name") or item.get("FriendlyName") or item.get("ProcessName") or "Unknown"
-                    # Tenta pegar a porcentagem mais relevante
+                    
+                    # 1. Porcentagem (ActiveTimePercent, Sw, Hw)
                     percent = None
-                    percent_label = ""
-                    for key in ("ActiveTimePercent", "DrainPercent", "Percent", "ActiveTime"):
+                    for key in ("ActiveTimePercent", "DrainPercent", "Percent"):
                         if key in item and isinstance(item[key], (int, float)):
                             percent = float(item[key])
-                            percent_label = key
                             break
-                    # Sw / Hw são proporções (0-1), multiplica por 100
                     if percent is None:
                         if "Sw" in item and isinstance(item["Sw"], (int, float)):
                             percent = float(item["Sw"]) * 100
-                            percent_label = "Sw (Software)"
                         elif "Hw" in item and isinstance(item["Hw"], (int, float)):
                             percent = float(item["Hw"]) * 100
-                            percent_label = "Hw (Hardware)"
+
+                    # 2. Drain Rate (mW)
+                    drain_mw = None
+                    for key in ("DrainRate", "Drain", "Rate"):
+                        if key in item and isinstance(item[key], (int, float)):
+                            drain_mw = float(item[key])
+                            break
                     
+                    # 3. Tempo Ativo (em ms, converte para segundos/minutos)
+                    active_time = None
+                    for key in ("ActiveTime", "ActiveTimeMs"):
+                        if key in item and isinstance(item[key], (int, float)):
+                            active_time = float(item[key])
+                            break
+
+                    # 4. Tipo (1=Hardware, 2=App, 7=Driver)
+                    type_map = {1: "Hardware", 2: "App", 7: "Driver/Sys"}
+                    raw_type = item.get("Type") or item.get("Component") or "Component"
+                    type_name = type_map.get(raw_type, str(raw_type))
+
                     if percent is not None and percent > 0:
-                        type_name = item.get("Type") or item.get("Component") or "Component"
                         results.append({
                             "name": str(name),
-                            "type": str(type_name),
+                            "type": type_name,
                             "percent": round(percent, 2),
                             "percent_str": f"{percent:.2f}%",
-                            "label": percent_label,
+                            "drain_mw": drain_mw,
+                            "active_time_s": (active_time / 1000.0) if active_time else None,
                             "is_known_culprit": any(c.lower() in str(name).lower() for c in KNOWN_CULPRITS),
                         })
-        # Recursão nos itens da lista
         for item in obj:
             results.extend(_walk_for_offenders(item, path))
     elif isinstance(obj, dict):
-        # Recursão nos valores
         for k, v in obj.items():
             results.extend(_walk_for_offenders(v, f"{path}.{k}"))
     return results
@@ -157,25 +171,10 @@ def parse_powercfg_report(html_path: Path) -> List[Dict]:
     # 4. Ordena e deduplica por nome, mantendo o maior percent
     by_name: Dict[str, Dict] = {}
     for r in all_results:
-        # Limpa códigos ANSI que possam ter vazado do HTML
-        name_clean = re.sub(r'\x1b\[[0-9;]*m', '', r["name"]).strip()
-        
-        # Mapeia o enum de Type do Windows (1=Hardware, 2=App, 7=Driver)
-        t_raw = str(r.get("type", ""))
-        if t_raw == "1":
-            t_clean = "Hardware"
-        elif t_raw == "2":
-            t_clean = "App"
-        elif t_raw == "7":
-            t_clean = "Driver/Sys"
-        else:
-            t_clean = t_raw
-
-        if name_clean not in by_name or r["percent"] > by_name[name_clean]["percent"]:
-            r["name"] = name_clean
-            r["type"] = t_clean
-            by_name[name_clean] = r
-    
+        name = r["name"]
+        if name not in by_name or r["percent"] > by_name[name]["percent"]:
+            by_name[name] = r
+            
     sorted_results = sorted(by_name.values(), key=lambda x: x["percent"], reverse=True)
     return sorted_results[:25]
 
@@ -194,3 +193,49 @@ def find_sleep_blockers() -> List[str]:
         return blockers
     except Exception:
         return []
+
+def parse_energy_report(html_path: Path) -> List[Dict]:
+    """
+    Lê o powercfg /energy e extrai erros/avisos de bloqueio e CPU.
+    """
+    if not html_path.exists():
+        return []
+        
+    with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f, "html.parser")
+        
+    results = []
+    
+    # Procura os blocos de erro e aviso
+    for div_class in ["error-log-entry", "warning-log-entry"]:
+        for entry in soup.find_all("div", class_=div_class):
+            header = entry.find("div", class_="log-entry-header")
+            content = entry.find("div", class_="log-entry-description")
+            
+            if not header or not content:
+                continue
+                
+            title = header.get_text(strip=True)
+            desc = content.get_text(strip=True)
+            
+            # Extrai o nome do processo se existir
+            proc_name = "Desconhecido"
+            details = entry.find_all("td", class_="detail-name")
+            for td in details:
+                if "Solicitando processo" in td.get_text():
+                    next_td = td.find_next_sibling("td")
+                    if next_td:
+                        path = next_td.get_text(strip=True)
+                        proc_name = path.split("\\")[-1]  # Pega só o .exe
+                        break
+                        
+            severity = "CRITICAL" if div_class == "error-log-entry" else "WARNING"
+            
+            results.append({
+                "severity": severity,
+                "title": title,
+                "description": desc,
+                "process": proc_name
+            })
+            
+    return results
