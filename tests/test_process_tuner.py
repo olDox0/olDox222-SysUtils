@@ -99,6 +99,28 @@ class ProcessTunerTests(unittest.TestCase):
         self.assertIn("nada foi alterado", message)
         self.assertEqual(self.process.affinity, original)
 
+    def test_windows_reserved_pid_is_rejected(self) -> None:
+        with patch.object(process_tuner, "get_core_indices", return_value=[2, 3]):
+            ok, message, _ = process_tuner.apply_process_affinity(4, "perf")
+        self.assertFalse(ok)
+        self.assertIn("reservado pelo Windows", message)
+
+    def test_exited_process_state_is_removed(self) -> None:
+        with patch.object(process_tuner, "get_core_indices", return_value=[2, 3]):
+            ok, message, _ = process_tuner.apply_process_affinity(4321, "perf")
+        self.assertTrue(ok, message)
+
+        with patch.object(
+            process_tuner.psutil,
+            "Process",
+            side_effect=process_tuner.psutil.NoSuchProcess(4321),
+        ):
+            ok, message, _ = process_tuner.restore_process_affinity(4321)
+
+        self.assertTrue(ok, message)
+        self.assertIn("registro obsoleto removido", message)
+        self.assertNotIn("4321", process_tuner._load_state())
+
     def test_unknown_topology_fails_closed_without_guessing(self) -> None:
         with (
             patch.object(process_tuner.psutil, "cpu_count", return_value=4),
