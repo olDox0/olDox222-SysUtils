@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -73,15 +74,12 @@ def _process_identity(process: psutil.Process) -> tuple[str, float]:
 
 def get_core_indices(core_type: str = "e-cores") -> List[int]:
     """Retorna índices lógicos P/E; não adivinha topologias desconhecidas."""
-    if core_type not in {"e-cores", "p-cores", "all"}:
+    if core_type not in {"e-cores", "p-cores"}:
         return []
 
     total_threads = psutil.cpu_count(logical=True) or 0
     if total_threads <= 0:
         return []
-    if core_type == "all":
-        return list(range(total_threads))
-
     topology = power_strategies.get_hybrid_cpu_topology(total_threads)
     wanted = "E-Core" if core_type == "e-cores" else "P-Core"
     return sorted(
@@ -120,12 +118,12 @@ def apply_process_affinity(
     try:
         processes = _load_state()
         old_record = processes.get(key)
-        same_identity = bool(old_record and _same_process(old_record, create_time))
+        same_identity = bool(isinstance(old_record, dict) and _same_process(old_record, create_time))
         if old_record and not same_identity:
             _record_event(
                 pid=pid,
-                name=old_record.get("name"),
-                create_time=old_record.get("create_time"),
+                name=old_record.get("name") if isinstance(old_record, dict) else None,
+                create_time=old_record.get("create_time") if isinstance(old_record, dict) else None,
                 action="state",
                 result="stale_pid_record_replaced",
                 details="O PID foi reutilizado; o estado anterior não pertence ao processo atual.",
@@ -324,7 +322,7 @@ def get_affinity_history(limit: int = 20) -> List[Dict[str, Any]]:
     """Lê os últimos eventos do histórico JSONL."""
     if limit < 1 or not HISTORY_FILE.exists():
         return []
-    events: List[Dict[str, Any]] = []
+    events = deque(maxlen=limit)
     try:
         with HISTORY_FILE.open("r", encoding="utf-8") as history:
             for line in history:
@@ -336,7 +334,7 @@ def get_affinity_history(limit: int = 20) -> List[Dict[str, Any]]:
                     events.append(event)
     except OSError as exc:
         raise RuntimeError(f"Não foi possível ler o histórico: {exc}") from exc
-    return events[-limit:]
+    return list(events)
 
 
 def pin_process(process_name: str, core_type: str = "e-cores") -> Tuple[bool, str, int]:
