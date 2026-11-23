@@ -105,6 +105,11 @@ def apply_process_affinity(
         _record_event(pid=pid, action="apply", mode=mode, result="rejected", details=message)
         return False, message, None
 
+    if pid in {0, 4}:
+        message = f"O PID {pid} é reservado pelo Windows; alteração de afinidade bloqueada."
+        _record_event(pid=pid, action="apply", mode=mode, result="rejected", details=message)
+        return False, message, None
+
     try:
         process = psutil.Process(pid)
         name, create_time = _process_identity(process)
@@ -264,7 +269,24 @@ def restore_process_affinity(
         previous = process.cpu_affinity()
         process.cpu_affinity(original)
         actual = process.cpu_affinity()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess,
+    except psutil.NoSuchProcess:
+        # O processo terminou; o Windows já descartou a afinidade atribuída.
+        # O registro não tem mais utilidade e pode ser removido com segurança.
+        processes.pop(key, None)
+        try:
+            _save_state(processes)
+        except OSError as exc:
+            return False, f"Processo encerrado, mas o registro obsoleto não pôde ser removido: {exc}", record
+        message = f"PID {pid} não está mais em execução; registro obsoleto removido."
+        _record_event(
+            pid=pid, name=record.get("name"),
+            create_time=record.get("create_time"),
+            action="restore", mode="normal",
+            original_affinity=record.get("original_affinity"),
+            result="process_exited", details=message,
+        )
+        return True, message, record
+    except (psutil.AccessDenied, psutil.ZombieProcess,
             OSError, ValueError, KeyError, TypeError) as exc:
         message = f"Falha ao restaurar a afinidade do PID {pid}: {exc}"
         _record_event(
