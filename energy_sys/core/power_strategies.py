@@ -124,53 +124,94 @@ def apply_power_setting(sub: str, setting: str, value: int) -> bool:
 
 def get_hybrid_cpu_topology(total_threads: int) -> Dict[int, str]:
     """
-    Identifica dinamicamente via Win32 API se cada thread pertence a um P-Core ou E-Core.
-    Utiliza GetLogicalProcessorInformationEx (RelationProcessorCore -> EfficiencyClass).
+    Identifica P-Cores e E-Cores pela EfficiencyClass do Windows.
+
+    Valores maiores de EfficiencyClass indicam maior desempenho intrínseco.
+    A classe máxima é tratada como P-Core e a mínima como E-Core. Se a
+    topologia não puder ser mapeada integralmente, retorna rótulos neutros.
     """
-    labels = {}
-    if os.name != 'nt':
-        return {i: "Padrão" for i in range(total_threads)}
+    default_map = {i: "Núcleo Padrão" for i in range(total_threads)}
+    if os.name != "nt" or total_threads <= 0:
+        return default_map
 
     try:
+        kernel32 = ctypes.windll.kernel32
+        get_info = kernel32.GetLogicalProcessorInformationEx
+
         buf_len = ctypes.c_ulong(0)
-        ctypes.windll.kernel32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(buf_len))
+        get_info(0, None, ctypes.byref(buf_len))
         if buf_len.value == 0:
-            return {i: "Core" for i in range(total_threads)}
+            return default_map
 
-        buf = ctypes.create_string_buffer(buf_len.value)
-        if not ctypes.windll.kernel32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(buf_len)):
-            return {i: "Core" for i in range(total_threads)}
+        buffer = ctypes.create_string_buffer(buf_len.value)
+        if not get_info(0, buffer, ctypes.byref(buf_len)):
+            return default_map
 
-        raw_bytes = buf.raw
+        raw_bytes = buffer.raw[:buf_len.value]
+        pointer_size = ctypes.sizeof(ctypes.c_void_p)
+        group_mask_size = pointer_size + 8
         offset = 0
-        has_efficiency_classes = False
-        eff_map = {}
+        logical_classes: Dict[int, int] = {}
 
-        while offset < buf_len.value:
-            rel = int.from_bytes(raw_bytes[offset:offset+4], 'little')
-            size = int.from_bytes(raw_bytes[offset+4:offset+8], 'little')
-            if size == 0:
-                break
-            
-            if rel == 0:  # RelationProcessorCore
-                eff_class = raw_bytes[offset+9]  # Retorna inteiro nativo no Python 3
-                if eff_class > 0:
-                    has_efficiency_classes = True
-                
-                # GroupMask affinity mask (offset 32 em sistemas x64)
-                mask = int.from_bytes(raw_bytes[offset+32:offset+40], 'little')
-                for thread_idx in range(64):
-                    if mask & (1 << thread_idx):
-                        eff_map[thread_idx] = "P-Core (Performance)" if eff_class > 0 else "E-Core (Eficiência)"
+        while offset + 8 <= len(raw_bytes):
+            relationship = int.from_bytes(raw_bytes[offset:offset + 4], "little")
+            structure_size = int.from_bytes(raw_bytes[offset + 4:offset + 8], "little")
+            if structure_size < 8 or offset + structure_size > len(raw_bytes):
+                return default_map
 
-            offset += size
+            if relationship == 0:  # RelationProcessorCore
+                if structure_size < 32:
+                    return default_map
 
-        if has_efficiency_classes and eff_map:
-            return eff_map
+                efficiency_class = raw_bytes[offset + 9]
+                group_count = int.from_bytes(raw_bytes[offset + 30:offset + 32], "little")
+                required_size = 32 + (group_count * group_mask_size)
+                if group_count < 1 or required_size > structure_size:
+                    return default_map
+
+                for group_index in range(group_count):
+                    group_offset = offset + 32 + (group_index * group_mask_size)
+                    mask = int.from_bytes(
+                        raw_bytes[group_offset:group_offset + pointer_size],
+                        "little",
+                    )
+                    group_id = int.from_bytes(
+                        raw_bytes[group_offset + pointer_size:group_offset + pointer_size + 2],
+                        "little",
+                    )
+
+                    # psutil expõe índices lógicos lineares. Até existir uma
+                    # conversão confiável de processor groups, falhamos seguro.
+                    if group_id != 0:
+                        return default_map
+
+                    bit = 0
+                    while mask:
+                        if mask & 1:
+                            logical_classes[bit] = efficiency_class
+                        mask >>= 1
+                        bit += 1
+
+            offset += structure_size
+
+        if set(logical_classes) != set(range(total_threads)):
+            return default_map
+
+        classes = set(logical_classes.values())
+        if len(classes) < 2:
+            return default_map
+
+        performance_class = max(classes)
+        return {
+            index: (
+                "P-Core (Performance)"
+                if efficiency_class == performance_class
+                else "E-Core (Eficiência)"
+            )
+            for index, efficiency_class in logical_classes.items()
+        }
     except Exception:
-        pass
-
-    return {i: "Núcleo Padrão" for i in range(total_threads)}
+        return default_map
 
 def get_cpu_telemetry() -> Dict:
     """Coleta métricas com distinção de arquitetura híbrida e clock."""

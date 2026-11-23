@@ -532,28 +532,98 @@ def cmd_kill_spotify():
 
 
 @cli.command("programs")
-@click.option("--kill-pid", type=int, help="Mata um processo específico pelo PID.")
-def cmd_programs(kill_pid: int | None):
-    """Analisa startups e processos zumbis, com controle total para matar."""
-    click.secho("\n--- ANÁLISE DE PROGRAMAS & ZUMBIS ---", fg="cyan", bold=True)
+@click.option("--kill-pid", type=click.IntRange(min=1), default=None, help="Encerra um processo específico pelo PID.")
+@click.option("--pid", type=click.IntRange(min=1), default=None, help="PID individual para alterar/restaurar afinidade.")
+@click.option("--normal", "normal", is_flag=True, help="Restaura a afinidade original registrada para o PID.")
+@click.option("--eco", "eco", is_flag=True, help="Restringe o PID aos E-cores.")
+@click.option("--perf", "perf", is_flag=True, help="Restringe o PID aos P-cores.")
+@click.option("--history", is_flag=True, help="Exibe o histórico de alterações de afinidade.")
+@click.option("--history-limit", type=click.IntRange(min=1, max=500), default=20, show_default=True, help="Quantidade de eventos exibidos com --history.")
+def cmd_programs(
+    kill_pid: int | None,
+    pid: int | None,
+    normal: bool,
+    eco: bool,
+    perf: bool,
+    history: bool,
+    history_limit: int,
+):
+    """Analisa programas e controla a afinidade de um PID específico."""
+    modes = [name for name, enabled in (("normal", normal), ("eco", eco), ("perf", perf)) if enabled]
 
-    if kill_pid:
-        click.secho(f"[*] Tentando matar o processo PID {kill_pid}...", fg="yellow")
+    if history:
+        if kill_pid is not None or pid is not None or modes:
+            raise click.UsageError("--history não pode ser combinado com --kill-pid, --pid ou modos de afinidade.")
+        from energy_sys.core import process_tuner
+        try:
+            events = process_tuner.get_affinity_history(history_limit)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        click.secho("\n--- HISTÓRICO DE AFINIDADE DE CPU ---", fg="cyan", bold=True)
+        if not events:
+            click.secho("Nenhuma operação de afinidade registrada.", fg="yellow")
+            return
+        for event in events:
+            timestamp = event.get("timestamp", "sem data")
+            event_pid = event.get("pid", "?")
+            process_name = event.get("name", "processo desconhecido")
+            action = event.get("action", "?")
+            mode = event.get("mode", "?")
+            result = event.get("result", "?")
+            previous = event.get("previous_affinity")
+            current = event.get("current_affinity")
+            click.echo(
+                f"[{timestamp}] PID {event_pid} {process_name} | "
+                f"{action}/{mode} | {result}"
+            )
+            if previous is not None or current is not None:
+                click.echo(f"    Afinidade: {previous} -> {current}")
+            details = event.get("details")
+            if details:
+                click.echo(f"    Detalhes: {details}")
+        click.echo(f"\nArquivo: {process_tuner.HISTORY_FILE}")
+        return
+
+    if kill_pid is not None:
+        if pid is not None or modes:
+            raise click.UsageError("--kill-pid é independente; não combine com --pid ou modos de afinidade.")
+        click.secho(f"[*] Tentando encerrar o processo PID {kill_pid}...", fg="yellow")
         if program_analyzer.kill_process_by_pid(kill_pid):
             click.secho(f"✔ Processo {kill_pid} encerrado.", fg="green")
         else:
-            click.secho(f"✘ Falha ao matar PID {kill_pid} (talvez precise de Admin).", fg="red")
+            click.secho(f"✘ Falha ao encerrar PID {kill_pid} (talvez precise de Admin).", fg="red")
         return
 
+    if pid is not None or modes:
+        if pid is None:
+            raise click.UsageError("Informe --pid <PID> junto com --normal, --eco ou --perf.")
+        if len(modes) != 1:
+            raise click.UsageError("Escolha exatamente um modo: --normal, --eco ou --perf.")
+
+        from energy_sys.core import process_tuner
+        mode = modes[0]
+        if mode == "normal":
+            ok, message, _ = process_tuner.restore_process_affinity(pid)
+        else:
+            ok, message, _ = process_tuner.apply_process_affinity(pid, mode)
+
+        color = "green" if ok else "red"
+        click.secho(f"\n[{'OK' if ok else 'FALHA'}] {message}", fg=color, bold=True)
+        click.echo(f"Registro de estado: {process_tuner.STATE_FILE}")
+        click.echo(f"Histórico: {process_tuner.HISTORY_FILE}")
+        return
+
+    click.secho("\n--- ANÁLISE DE PROGRAMAS & PROCESSOS ---", fg="cyan", bold=True)
     click.secho("\n[*] Programas que iniciam com o Windows:", fg="cyan")
     startups = program_analyzer.get_startup_programs()
     if not startups:
         click.secho("  (Nenhum detectado)", fg="yellow")
     else:
-        for s in startups:
-            name = s.get("Name", "Desconhecido")
-            loc = s.get("Location", "").split("\\")[-1]
-            click.echo(f"  • {name:<35} [{loc}]")
+        for item in startups:
+            name = item.get("Name", "Desconhecido")
+            location = item.get("Location", "").split("\\")[-1]
+            click.echo(f"  • {name:<35} [{location}]")
 
     click.secho("\n[*] Processos 'Zumbis' rodando agora:", fg="cyan")
     zombies = program_analyzer.get_zombie_processes()
@@ -562,12 +632,21 @@ def cmd_programs(kill_pid: int | None):
     else:
         click.echo(f"  {'PID':>8} | {'CPU%':>6} | {'USUÁRIO':<25} | PROCESSO")
         click.echo("  " + "-" * 60)
-        for z in zombies:
+        for zombie in zombies:
             click.secho(
-                f"  {z['pid']:>8} | {z['cpu']:>5}% | {z['user']:<25} | {z['name']}",
-                fg="red"
+                f"  {zombie['pid']:>8} | {zombie['cpu']:>5}% | "
+                f"{zombie['user']:<25} | {zombie['name']}",
+                fg="red",
             )
-        click.secho("\n💡 Dica: Use 'sysutils energy programs --kill-pid <PID>' para matar um específico.", fg="yellow")
+        click.secho(
+            "\nUse 'sysutils energy programs --pid <PID> --perf/--eco' "
+            "para alterar um processo específico.",
+            fg="yellow",
+        )
+        click.secho(
+            "Use '--normal' para restaurar a afinidade original e '--history' para auditar.",
+            fg="yellow",
+        )
 
 @cli.group("startup")
 def startup_group():
@@ -861,11 +940,12 @@ def cmd_hw_install_driver():
 
 @cli.command("pin")
 @click.argument("process_name")
-@click.option("--core-type", type=click.Choice(["e-cores", "p-cores", "all"]), default="e-cores", help="Tipo de núcleo para fixar o processo.")
+@click.option("--core-type", type=click.Choice(["e-cores", "p-cores"]), default="e-cores", help="Tipo de núcleo para fixar o processo.")
 def cmd_pin(process_name: str, core_type: str):
     """Força um processo a rodar apenas em núcleos específicos (Afinidade de CPU)."""
     from energy_sys.core import process_tuner
     click.secho(f"\n--- AFINIDADE DE CPU ---", fg="cyan", bold=True)
+    click.secho("[AVISO] Comando legado por nome: todas as instâncias com esse nome podem ser afetadas.", fg="yellow")
     click.echo(f"[*] Fixando '{process_name}' nos {core_type.upper()}...")
     
     ok, msg, count = process_tuner.pin_process(process_name, core_type)
