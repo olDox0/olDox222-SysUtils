@@ -940,7 +940,7 @@ def cmd_hw_install_driver():
 
 @cli.command("pin")
 @click.argument("process_name")
-@click.option("--core-type", type=click.Choice(["e-cores", "p-cores", "all"]), default="e-cores", help="Tipo de núcleo para fixar o processo.")
+@click.option("--core-type", type=click.Choice(["e-cores", "p-cores"]), default="e-cores", help="Tipo de núcleo para fixar o processo.")
 def cmd_pin(process_name: str, core_type: str):
     """Força um processo a rodar apenas em núcleos específicos (Afinidade de CPU)."""
     from energy_sys.core import process_tuner
